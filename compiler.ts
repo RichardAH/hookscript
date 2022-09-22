@@ -159,12 +159,23 @@ function printRecursiveFrom(
 }
 
 function walk(
-    node: ts.Node, srcfile: ts.SourceFile, findKind: number, visit: (node:ts.Node)=>void ) : void
+    node: ts.Node, srcfile: ts.SourceFile, findKind: any, visit: (node:ts.Node)=>void ) : void
 {
     if (node.kind == undefined)
         return;
 
-    if (node.kind == findKind)
+    if (Array.isArray(findKind))
+    {
+        let tmp:any = {};
+        for (let i = 0; i < findKind.length; ++i)
+        {
+            let kind:number = findKind[i];
+            tmp[kind] = true;
+        }
+        findKind = tmp;
+    }
+
+    if (findKind[node.kind])
         visit(node);
     
     node.forEachChild(child =>
@@ -186,14 +197,14 @@ function die(ctx:any, node:ts.Node, msg:string):void
 
 function processImports(ctx: any) : void
 {
-    walk(ctx.srcfile, ctx.srcfile, ts.SyntaxKind.CallExpression, 
+    walk(ctx.srcfile, ctx.srcfile, [ts.SyntaxKind.CallExpression], 
     (node:any):void=> 
     {
         //console.log("walked to: ", node.getText(srcfile));
         const funcname = node.expression.escapedText;
 
-        if (hookapi[funcname] == undefined)
-            die(ctx, node, "function " + funcname + " is not a HookApi");
+        if (!hookapi[funcname])
+            return;
 
         const typekey = hookapi[funcname].typekey;
         if (ctx.types[typekey] == undefined)
@@ -228,7 +239,7 @@ const allowed_macro_types:any =
 function processFunctions(ctx: any) : void
 {
 
-    walk(ctx.srcfile, ctx.srcfile, ts.SyntaxKind.FunctionDeclaration, 
+    walk(ctx.srcfile, ctx.srcfile, [ts.SyntaxKind.FunctionDeclaration], 
     (node:any):void=> 
     {
         const funcname = node.name.escapedText;
@@ -289,6 +300,8 @@ function processFunctions(ctx: any) : void
             if (rettype != 'void' && !allowed_macro_types[rettype])
                 die(ctx, node, "in macro " + funcname + ", return type: " + rettype + " not allowed.");
         }
+        
+        const sig = (param_types.length == 0 ? 'void' : param_types.join(',')) + '->' + rettype;
 
         if (realfunc)
         {
@@ -296,8 +309,7 @@ function processFunctions(ctx: any) : void
             {
                 idx: ctx.func_count,
                 name: funcname,
-                rettype: rettype,
-                params: params,
+                type: parseMethodSig(sig),
                 body: node.body,
                 typeidx: 0,         // hard coded always the hook/cbak type
             }
@@ -305,18 +317,91 @@ function processFunctions(ctx: any) : void
         }
         else
         {
-            const sig = (param_types.length == 0 ? 'void' : param_types.join(',')) + '->' + rettype;
             ctx.macros[funcname] =
             {
                 idx: ctx.macro_count,
                 name: funcname,
-                rettype: rettype,
-                params: params,
-                body: node.body,
-                sig: sig
+                type: parseMethodSig(sig),
+                body: node.body
             }
             ctx.macros_map[ctx.macro_count++] = funcname;
         }
+    });
+}
+
+function validateAndShakeFunctions(ctx: any) : void
+{
+    let touched: any = {};
+    for (let i = 0; i < ctx.macro_count; ++i)
+        touched[ctx.macros_map[i]] = false;
+
+    let changed = false;
+
+    const visitor =
+    (node:any):void=> 
+    {
+        //console.log("walked to: ", node.getText(srcfile));
+        const funcname = node.expression.escapedText;
+
+        if (funcname == 'hook' || funcname == 'cbak')
+            die(ctx, node, "hook and cbak cannot be called from inside the hook.");
+
+        if (hookapi[funcname])
+            return;
+
+        if (!ctx.macros[funcname])
+            die(ctx, node, "macro `" + funcname + "` is referenced but not defined.");
+
+        if (!touched[funcname])
+        {
+            touched[funcname] = true;
+            changed = true;
+        }
+    };
+
+    for (let i = 0; i < ctx.func_count; ++i)
+    {
+        const funcname = ctx.funcs_map[i];
+        const func = ctx.funcs[funcname];
+        walk(func.body, ctx.srcfile, [ts.SyntaxKind.CallExpression], visitor);
+    }
+
+    do 
+    {
+        changed = false;
+        for (let i = 0; i < ctx.macro_count; ++i)
+        {
+            const funcname = ctx.macros_map[i];
+            const func = ctx.macros[funcname];
+
+            // check this macro to see if it calls other macros
+            if (touched[funcname])
+                walk(func.body, ctx.srcfile, [ts.SyntaxKind.CallExpression], visitor);
+        }
+    } while (changed);
+
+    // mark unused macros
+    for (let i = 0; i < ctx.macro_count; ++i)
+    {
+        const funcname = ctx.macros_map[i];
+        ctx.macros[funcname].unused = !touched[funcname];
+
+        if (!touched[funcname])
+            console.error("Warn: unused macro `" + funcname + "`");
+    }
+}
+
+
+function processData(ctx: any) : void
+{
+    // first process string literals
+    walk(ctx.srcfile, ctx.srcfile, [ts.SyntaxKind.StringLiteral], 
+    (node:any):void=> 
+    {
+        // RH UPTO
+        // concat string literals together into a data blob to be emitted to wasm
+        // concat (non-string) array literals in the samw way
+//        d(node, 6);
     });
 }
 
@@ -347,11 +432,18 @@ let ctx:any =
     macros: {},
     macros_map: {},     // idx -> key
     macro_count: 0,
+
+    literals: {},
+    literals_map: {},
+    literal_count: 0
 };
 
 processImports(ctx);
 processFunctions(ctx);
 
+validateAndShakeFunctions(ctx); // remove all unused/unreferenced macros
+
+processData(ctx);
 
 //process.exit(0);
 
@@ -381,6 +473,41 @@ for (let i = 0; i < ctx.import_count; ++i)
         '(type ' + imp.typeidx + ')))'
     );
 }
+
+// output funcs
+for (let i = 0; i < ctx.func_count; ++i)
+{
+    const funcname = ctx.funcs_map[i];
+    const func = ctx.funcs[funcname];
+    const type = func.type;
+    console.log("  " +
+        "(func (;" + i + ";) " +
+        "(type " + func.typeidx + ") " +
+            (type.params.length > 0 ? 
+            "(param " + type.params.join(' ') + ") " : "") +
+            "(result " + type.rettype + ")");
+    // code generation here
+    console.log("  )");
+}
+
+// output memory
+console.log('  (memory (;0;) 2)');
+
+
+// output globals
+// TODO
+
+// output exports
+for (let i = 0; i < ctx.func_count; ++i)
+{
+    const funcname = ctx.funcs_map[i];
+    console.log(
+        '  (export "' + funcname + '" (func ' + (i + ctx.import_count) + '))'
+    )
+}
+
+//output data section
+// TODO
 
 console.log(')');
 
