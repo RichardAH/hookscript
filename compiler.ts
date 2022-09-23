@@ -99,10 +99,10 @@ const hookapi:any =
 })();
 
 const filename = process.argv[2];
-const code = Buffer.from(fs.readFileSync(filename)).toString('utf-8');
+const rawfile = Buffer.from(fs.readFileSync(filename)).toString('utf-8');
 
 const srcfile = ts.createSourceFile(
-    filename, code, ts.ScriptTarget.Latest
+    filename, rawfile, ts.ScriptTarget.Latest
 );
 
 
@@ -161,10 +161,10 @@ function printRecursiveFrom(
 function walk(
     node: ts.Node, srcfile: ts.SourceFile, findKind: any, visit: (node:ts.Node)=>void ) : void
 {
-    if (node.kind == undefined)
+    if (node === undefined || node.kind === undefined)
         return;
 
-    if (Array.isArray(findKind))
+    if (findKind && Array.isArray(findKind))
     {
         let tmp:any = {};
         for (let i = 0; i < findKind.length; ++i)
@@ -175,7 +175,7 @@ function walk(
         findKind = tmp;
     }
 
-    if (findKind[node.kind])
+    if (findKind === undefined || findKind[node.kind])
         visit(node);
     
     node.forEachChild(child =>
@@ -191,7 +191,15 @@ function d(node:any, depth:number = 2):void
 
 function die(ctx:any, node:ts.Node, msg:string):void
 {
-    console.error("Error: " + msg, node.getText(ctx.srcfile));
+    const pos = node.pos;
+    const end = node.end;
+    const lineno = (ctx.rawfile.substr(0, pos).match(/\n/g) || []).length + 1;
+    console.error(
+        "Error: " +
+        ctx.filename + ":" + lineno + " " +
+        msg + " " +
+        "Near: `" + node.getText(ctx.srcfile) + "`",
+    );
     process.exit(1);
 }
 
@@ -227,14 +235,27 @@ function processImports(ctx: any) : void
     });
 }
 
-const allowed_macro_types:any =
+const allowed_types:any =
 {
     'i32': true,
     'i64': true,
     'string': true,
     'bigstring': true,
-    'xfl': true
-}
+    'xfl': true,
+    'i8' : true,
+    'u8' : true,
+    'u32' : true,
+    'u64' : true,
+    'Array<i32>': true,
+    'Array<i64>': true,
+    'Array<string>': true,
+    'Array<bigstring>': true,
+    'Array<xfl>': true,
+    'Array<i8>' : true,
+    'Array<u8>' : true,
+    'Array<u32>' : true,
+    'Array<u64>' : true
+};
 
 function processFunctions(ctx: any) : void
 {
@@ -269,8 +290,8 @@ function processFunctions(ctx: any) : void
             }
             else
             {
-                if (!allowed_macro_types[type])
-                    die(ctx, node, "in macro " + funcname + ", parameter type: " + type + " not allowed.");
+                if (!allowed_types[type])
+                    die(ctx, node, "in macro " + funcname + ", parameter type: " + type + " not supported.");
             }
 
             params.push(
@@ -297,8 +318,8 @@ function processFunctions(ctx: any) : void
         }
         else
         {   
-            if (rettype != 'void' && !allowed_macro_types[rettype])
-                die(ctx, node, "in macro " + funcname + ", return type: " + rettype + " not allowed.");
+            if (rettype != 'void' && !allowed_types[rettype])
+                die(ctx, node, "in macro " + funcname + ", return type: " + rettype + " not supported.");
         }
         
         const sig = (param_types.length == 0 ? 'void' : param_types.join(',')) + '->' + rettype;
@@ -391,7 +412,7 @@ function validateAndShakeFunctions(ctx: any) : void
     }
 }
 
-
+/*
 function processData(ctx: any) : void
 {
     // first process string literals
@@ -404,9 +425,12 @@ function processData(ctx: any) : void
 //        d(node, 6);
     });
 }
+*/
 
 let ctx:any = 
 {
+    filename: filename,
+    rawfile: rawfile,
     srcfile: srcfile,
     
     /* types as they will appear in the output wasm, with the first type prefilled for hook & cbak */
@@ -438,12 +462,147 @@ let ctx:any =
     literal_count: 0
 };
 
+function getTypeName(ctx:any, node:any) : string
+{
+    if (!node)
+        return "any";
+
+    if (node.type)
+        node = node.type;
+
+    let tn = "any";
+
+    if (node.typeName && node.typeName.escapedText)
+        tn = node.typeName.escapedText;
+    else
+        tn = ctx.rawfile.substr(node.pos, node.end - node.pos);
+
+    if (tn.match(/^Array.*/) &&
+        node.typeArguments && node.typeArguments[0])
+    {
+        if (node.typeArguments.length == 1)
+        {
+            const arg = node.typeArguments[0];
+
+            let inner = "any";
+
+            if (arg.typeName &&
+                arg.typeName.escapedText)
+                inner = arg.typeName.escapedText;
+            else
+                inner = ctx.rawfile.substr(arg.pos, arg.end - arg.pos);
+
+            tn = "Array<" + inner + ">";
+        }
+    }
+
+    return tn;
+}
+
+function getArrayInnerType(tn: string) : string | undefined
+{
+    const tn2 = tn.replace(/^Array<([^>]+)>$/g, '$1');
+    if (tn2 == '')
+        return undefined;
+    if (tn2 != tn)
+        return tn2;
+    return undefined;
+}
+
+function validateTypes(ctx: any) : void
+{
+    walk(ctx.srcfile, ctx.srcfile,
+         [ts.SyntaxKind.VariableDeclaration], 
+    (node:any):void=> 
+    {
+        const k = node.kind;
+        
+        // VariableDeclaration
+        const tn = getTypeName(ctx, node);
+        if (tn === undefined || !(tn in allowed_types))
+        {
+            if (tn === undefined)
+                die(ctx, node, "Type any / unspecified types are not supported.");
+            else
+                die(ctx, node, "Type `" + tn + "` is not supported.");
+        }
+
+        const validateLiteral = (node:any, inner:string) : void =>
+        {
+            const k = node.kind;
+            if (inner == 'string' || inner == 'bigstring')
+            {
+                if (k != ts.SyntaxKind.StringLiteral)
+                    die(ctx, node, "Array<" + inner + "> may only be initialized using string literals.");
+                return;
+            }
+            
+            if (k != ts.SyntaxKind.NumericLiteral)
+                die(ctx, node, "Array<" + inner + "> may only be initialized using numeric literals.");
+
+            const txt = node.text;
+            if (txt.match(/[0-9]+\.[0-9]+/g) && inner != 'xfl')
+                die(ctx, node, "Cannot initialize " + inner + " with fractional value.");
+        }
+
+        // if it's an array we should check initializer args (if any)
+        const inner = getArrayInnerType('' + tn);
+        if (inner !== undefined && node.initializer && node.initializer.elements.length > 0)
+        {
+            const init = node.initializer.elements;
+            for (let i = 0; i < init.length; ++i)
+                validateLiteral(init[i], inner);
+            return;
+        }        
+        
+        // non-array, check initializer
+        if (node.initializer)
+            validateLiteral(node.initializer, tn);
+
+    });
+
+}
+
+function validateTopLevelAST(ctx: any) : void
+{
+    // top level may contain only:
+    // - functions
+    // - variable declarations
+
+    //VariableStatement
+    //FunctionDeclaration
+
+    const node : ts.Node = ctx.srcfile;
+    node.forEachChild(child =>
+    {
+        const k = child.kind;
+        if (k != ts.SyntaxKind.VariableStatement &&
+            k != ts.SyntaxKind.FunctionDeclaration &&
+            k != ts.SyntaxKind.EndOfFileToken)
+        {
+            die(ctx, child, 
+                "Only variable declarations are allowed outside of a function. Found: " + 
+                    ts.SyntaxKind[child.kind] + ".");
+        }
+        else if (k == ts.SyntaxKind.VariableStatement)
+        {
+            // enforce single type arrays
+
+        }
+    });
+
+}
+
+validateTypes(ctx);
+
+validateTopLevelAST(ctx);
+
 processImports(ctx);
 processFunctions(ctx);
 
 validateAndShakeFunctions(ctx); // remove all unused/unreferenced macros
 
-processData(ctx);
+//processData(ctx);
 
 //process.exit(0);
 
@@ -511,6 +670,8 @@ for (let i = 0; i < ctx.func_count; ++i)
 
 console.log(')');
 
+
+printRecursiveFrom(srcfile, 0, srcfile);
 //d(ctx, 4);
 /*
 for (let s = 0; s < srcfile.statements.length; ++s)
