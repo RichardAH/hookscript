@@ -93,6 +93,11 @@ const hookapi:any =
                 raw: rawEntry,
                 ... parseMethodSig(sig)
             };
+            ret['$' + apiName] = 
+            {
+                raw: rawEntry,
+                ... parseMethodSig(sig)
+            };
         }
     } while (m);
     return ret;
@@ -203,7 +208,7 @@ function die(ctx:any, node:ts.Node, msg:string):void
     process.exit(1);
 }
 
-function processImports(ctx: any) : void
+function inferImports(ctx: any) : void
 {
     walk(ctx.srcfile, ctx.srcfile, [ts.SyntaxKind.CallExpression], 
     (node:any):void=> 
@@ -235,27 +240,67 @@ function processImports(ctx: any) : void
     });
 }
 
-const allowed_types:any =
+
+const string_types: any =
 {
-    'i32': true,
-    'i64': true,
     'string': true,
-    'bigstring': true,
-    'xfl': true,
+    'bigstring': true
+}
+
+const float_types: any =
+{
+    'xfl': true
+}
+const int_types: any =
+{
     'i8' : true,
     'u8' : true,
-    'u32' : true,
-    'u64' : true,
-    'Array<i32>': true,
-    'Array<i64>': true,
-    'Array<string>': true,
-    'Array<bigstring>': true,
-    'Array<xfl>': true,
-    'Array<i8>' : true,
-    'Array<u8>' : true,
-    'Array<u32>' : true,
-    'Array<u64>' : true
-};
+    'i16': true,
+    'u16': true,
+    'i32': true,
+    'u32': true,
+    'i64': true,
+    'u64': true
+}
+
+const obj_types: any =
+{
+    'Object': true,
+    'Account': true,
+    'Amount': true
+}
+
+const aliased_types : any = 
+{
+    'number': 'i32'
+}
+
+const allowed_types:any =
+(():any=>
+{
+    let out:any = {};
+    const addTypes = (types:any) : void =>
+    {
+        types = Object.keys(types);
+        for (let i = 0; i < types.length; ++i)
+        {
+            if (out[types[i]] === undefined)
+                out[types[i]] = true;
+            if (out['Array<' + types[i] + '>'] === undefined)
+                out['Array<' + types[i] + '>'] = true;
+
+        }
+    }
+
+    addTypes(string_types);
+    addTypes(float_types);
+    addTypes(int_types);
+    addTypes(obj_types);
+    return out;
+})();
+
+d(allowed_types, 2);
+
 
 function processFunctions(ctx: any) : void
 {
@@ -412,8 +457,7 @@ function validateAndShakeFunctions(ctx: any) : void
     }
 }
 
-/*
-function processData(ctx: any) : void
+function processInitializers(ctx: any) : void
 {
     // first process string literals
     walk(ctx.srcfile, ctx.srcfile, [ts.SyntaxKind.StringLiteral], 
@@ -425,42 +469,7 @@ function processData(ctx: any) : void
 //        d(node, 6);
     });
 }
-*/
 
-let ctx:any = 
-{
-    filename: filename,
-    rawfile: rawfile,
-    srcfile: srcfile,
-    
-    /* types as they will appear in the output wasm, with the first type prefilled for hook & cbak */
-    types: { 
-        "i32->i64" : 0 
-    },
-    types_map: {
-        0: "i32->i64"
-    },      // idx -> key
-    type_count: 1,
-
-    /* imports as they will appear in the output wasm */
-    imports: {},
-    imports_map: {},    // idx -> key
-    import_count: 0,
-
-    /* functions as they will appear in the output wasm */
-    funcs: {},
-    funcs_map: {},      // idx -> key
-    func_count : 0,
-
-    /* macros are user defined functions that are always inlined */
-    macros: {},
-    macros_map: {},     // idx -> key
-    macro_count: 0,
-
-    literals: {},
-    literals_map: {},
-    literal_count: 0
-};
 
 function getTypeName(ctx:any, node:any) : string
 {
@@ -475,11 +484,29 @@ function getTypeName(ctx:any, node:any) : string
     if (node.typeName && node.typeName.escapedText)
         tn = node.typeName.escapedText;
     else
-        tn = ctx.rawfile.substr(node.pos, node.end - node.pos);
+    if (node.type === undefined && node.initializer !== undefined)
+    {
+        const k = node.initializer.kind;
+        if (k == ts.SyntaxKind.StringLiteral)
+            tn = "string";
+        else if (k == ts.SyntaxKind.NumericLiteral)
+            tn = "number";
+        else if (k == ts.SyntaxKind.ObjectLiteralExpression)
+            tn = "Object";
+        else if (k == ts.SyntaxKind.NewExpression)
+        {
+            d(node, 3);
+            console.log(ts.SyntaxKind[k]);
+        }
+        // RH UPTO: array literal expression (and infer inner type)
+    }
+
+    tn = tn.trim();
 
     if (tn.match(/^Array.*/) &&
         node.typeArguments && node.typeArguments[0])
     {
+        d(node, 3);
         if (node.typeArguments.length == 1)
         {
             const arg = node.typeArguments[0];
@@ -489,14 +516,18 @@ function getTypeName(ctx:any, node:any) : string
             if (arg.typeName &&
                 arg.typeName.escapedText)
                 inner = arg.typeName.escapedText;
+            else if (arg.typeName)
+                inner = ctx.rawfile.substr(arg.typeName.pos, arg.typeName.end - arg.typeName.pos);
             else
                 inner = ctx.rawfile.substr(arg.pos, arg.end - arg.pos);
 
-            tn = "Array<" + inner + ">";
+            console.log("here");
+            d(node, 3);
+            tn = "Array<" + inner.trim() + ">";
         }
     }
 
-    return tn;
+    return tn.trim();
 }
 
 function getArrayInnerType(tn: string) : string | undefined
@@ -533,21 +564,36 @@ function validateTypes(ctx: any) : void
             if (inner == 'string' || inner == 'bigstring')
             {
                 if (k != ts.SyntaxKind.StringLiteral)
-                    die(ctx, node, "Array<" + inner + "> may only be initialized using string literals.");
+                    die(ctx, node, "Type " + inner + " may only be initialized using string literals.");
                 return;
             }
-            
-            if (k != ts.SyntaxKind.NumericLiteral)
-                die(ctx, node, "Array<" + inner + "> may only be initialized using numeric literals.");
 
-            const txt = node.text;
-            if (txt.match(/[0-9]+\.[0-9]+/g) && inner != 'xfl')
-                die(ctx, node, "Cannot initialize " + inner + " with fractional value.");
+            if (inner in int_types)
+            {
+               if (k != ts.SyntaxKind.NumericLiteral)
+                   die(ctx, node, "Type " + inner + " may only be initialized using numeric literals.");
+               return;
+            }
+
+            if (inner == 'xfl')
+            {
+                if (k == ts.SyntaxKind.NumericLiteral && node.text.match(/[0-9]+\.[0-9]+/g) && inner != 'xfl')
+                    die(ctx, node, "Cannot initialize " + inner + " with fractional value.");
+                return;
+            }
+
+            if (inner in obj_types)
+            {
+               if (k != ts.SyntaxKind.ObjectLiteralExpression)
+                   die(ctx, node, "Object types can only be initalized with object literals.");
+               return;
+            }
         }
 
         // if it's an array we should check initializer args (if any)
         const inner = getArrayInnerType('' + tn);
-        if (inner !== undefined && node.initializer && node.initializer.elements.length > 0)
+        if (inner !== undefined && node.initializer && 
+            node.initializer.elements && node.initializer.elements.length > 0)
         {
             const init = node.initializer.elements;
             for (let i = 0; i < init.length; ++i)
@@ -559,6 +605,7 @@ function validateTypes(ctx: any) : void
         if (node.initializer)
             validateLiteral(node.initializer, tn);
 
+        node.validedTypeName = tn;
     });
 
 }
@@ -584,23 +631,53 @@ function validateTopLevelAST(ctx: any) : void
                 "Only variable declarations are allowed outside of a function. Found: " + 
                     ts.SyntaxKind[child.kind] + ".");
         }
-        else if (k == ts.SyntaxKind.VariableStatement)
-        {
-            // enforce single type arrays
-
-        }
     });
-
 }
 
-validateTypes(ctx);
+let ctx:any = 
+{
+    filename: filename,
+    rawfile: rawfile,
+    srcfile: srcfile,
+    
+    /* types as they will appear in the output wasm, with the first type prefilled for hook & cbak */
+    types: { 
+        "i32->i64" : 0 
+    },
+    types_map: {
+        0: "i32->i64"
+    },      // idx -> key
+    type_count: 1,
+
+    /* imports as they will appear in the output wasm */
+    imports: {},
+    imports_map: {},    // idx -> key
+    import_count: 0,
+
+    /* functions as they will appear in the output wasm */
+    funcs: {},
+    funcs_map: {},      // idx -> key
+    func_count : 0,
+
+    /* macros are user defined functions that are always inlined */
+    macros: {},
+    macros_map: {},     // idx -> key
+    macro_count: 0,
+
+    globals: {},
+    globals_map: {},
+    globals_count: 0
+};
 
 validateTopLevelAST(ctx);
+validateTypes(ctx);
 
-processImports(ctx);
+inferImports(ctx);
 processFunctions(ctx);
 
 validateAndShakeFunctions(ctx); // remove all unused/unreferenced macros
+
+processInitializers(ctx); 
 
 //processData(ctx);
 
