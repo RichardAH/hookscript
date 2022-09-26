@@ -7,6 +7,7 @@ if (process.argv.length != 3)
     process.exit(1);
 }
 
+const Sym = ts.SyntaxKind;
 
 function parseMethodSig(sig:string)
 {
@@ -151,7 +152,7 @@ function printRecursiveFrom(
     node: ts.Node, indentLevel: number, srcfile: ts.SourceFile
 ) {
     const indentation = "-".repeat(indentLevel);
-    let syntaxKind = ts.SyntaxKind[node.kind];
+    let syntaxKind = Sym[node.kind];
     if (markers[syntaxKind] != undefined)
         syntaxKind = markers[syntaxKind];
 
@@ -210,7 +211,7 @@ function die(ctx:any, node:ts.Node, msg:string):void
 
 function inferImports(ctx: any) : void
 {
-    walk(ctx.srcfile, ctx.srcfile, [ts.SyntaxKind.CallExpression], 
+    walk(ctx.srcfile, ctx.srcfile, [Sym.CallExpression], 
     (node:any):void=> 
     {
         //console.log("walked to: ", node.getText(srcfile));
@@ -305,7 +306,7 @@ d(allowed_types, 2);
 function processFunctions(ctx: any) : void
 {
 
-    walk(ctx.srcfile, ctx.srcfile, [ts.SyntaxKind.FunctionDeclaration], 
+    walk(ctx.srcfile, ctx.srcfile, [Sym.FunctionDeclaration], 
     (node:any):void=> 
     {
         const funcname = node.name.escapedText;
@@ -429,7 +430,7 @@ function validateAndShakeFunctions(ctx: any) : void
     {
         const funcname = ctx.funcs_map[i];
         const func = ctx.funcs[funcname];
-        walk(func.body, ctx.srcfile, [ts.SyntaxKind.CallExpression], visitor);
+        walk(func.body, ctx.srcfile, [Sym.CallExpression], visitor);
     }
 
     do 
@@ -442,7 +443,7 @@ function validateAndShakeFunctions(ctx: any) : void
 
             // check this macro to see if it calls other macros
             if (touched[funcname])
-                walk(func.body, ctx.srcfile, [ts.SyntaxKind.CallExpression], visitor);
+                walk(func.body, ctx.srcfile, [Sym.CallExpression], visitor);
         }
     } while (changed);
 
@@ -460,7 +461,7 @@ function validateAndShakeFunctions(ctx: any) : void
 function processInitializers(ctx: any) : void
 {
     // first process string literals
-    walk(ctx.srcfile, ctx.srcfile, [ts.SyntaxKind.StringLiteral], 
+    walk(ctx.srcfile, ctx.srcfile, [Sym.StringLiteral], 
     (node:any):void=> 
     {
         // RH UPTO
@@ -487,16 +488,16 @@ function getTypeName(ctx:any, node:any) : string
     if (node.type === undefined && node.initializer !== undefined)
     {
         const k = node.initializer.kind;
-        if (k == ts.SyntaxKind.StringLiteral)
+        if (k == Sym.StringLiteral)
             tn = "string";
-        else if (k == ts.SyntaxKind.NumericLiteral)
+        else if (k == Sym.NumericLiteral)
             tn = "number";
-        else if (k == ts.SyntaxKind.ObjectLiteralExpression)
+        else if (k == Sym.ObjectLiteralExpression)
             tn = "Object";
-        else if (k == ts.SyntaxKind.NewExpression)
+        else if (k == Sym.NewExpression)
         {
-            d(node, 3);
-            console.log(ts.SyntaxKind[k]);
+           // d(node, 3);
+            console.log(Sym[k]);
         }
         // RH UPTO: array literal expression (and infer inner type)
     }
@@ -540,14 +541,39 @@ function getArrayInnerType(tn: string) : string | undefined
     return undefined;
 }
 
+function asString(ctx: any, node: ts.Node) : string
+{
+    let s = ctx.rawfile.substr(node.pos, node.end - node.pos).trim();
+    s = s.replace(/\/\/.*/, '').trim();
+    s = s.replace(/\/\*.*?\*\//, '').trim();
+    s = s.replace(/  */, ' ').replace(/\n\n*/, '\n').trim();
+    return s;
+}
+
 function validateTypes(ctx: any) : void
 {
     walk(ctx.srcfile, ctx.srcfile,
-         [ts.SyntaxKind.VariableDeclaration], 
+         [Sym.VariableStatement, Sym.VariableDeclaration, Sym.NewExpression, Sym.NewKeyword, Sym.ConstKeyword], 
     (node:any):void=> 
     {
+
         const k = node.kind;
         
+        if (k != Sym.VariableDeclaration)
+        {
+        
+            if (k == Sym.NewKeyword || k == Sym.NewExpression)
+                die(ctx, node, "New keyword is not supported (try omitting it).");
+        
+            const rawnode = asString(ctx, node);
+            
+            if (k == Sym.ConstKeyword ||
+                rawnode.match(/(^| |\t)+const($| |\t)+/))
+                die(ctx, node, "Const keyword is not supported. Use let instead.");
+            return;
+        }
+        
+
         // VariableDeclaration
         const tn = getTypeName(ctx, node);
         if (tn === undefined || !(tn in allowed_types))
@@ -563,28 +589,28 @@ function validateTypes(ctx: any) : void
             const k = node.kind;
             if (inner == 'string' || inner == 'bigstring')
             {
-                if (k != ts.SyntaxKind.StringLiteral)
+                if (k != Sym.StringLiteral)
                     die(ctx, node, "Type " + inner + " may only be initialized using string literals.");
                 return;
             }
 
             if (inner in int_types)
             {
-               if (k != ts.SyntaxKind.NumericLiteral)
+               if (k != Sym.NumericLiteral)
                    die(ctx, node, "Type " + inner + " may only be initialized using numeric literals.");
                return;
             }
 
             if (inner == 'xfl')
             {
-                if (k == ts.SyntaxKind.NumericLiteral && node.text.match(/[0-9]+\.[0-9]+/g) && inner != 'xfl')
+                if (k == Sym.NumericLiteral && node.text.match(/[0-9]+\.[0-9]+/g) && inner != 'xfl')
                     die(ctx, node, "Cannot initialize " + inner + " with fractional value.");
                 return;
             }
 
             if (inner in obj_types)
             {
-               if (k != ts.SyntaxKind.ObjectLiteralExpression)
+               if (k != Sym.ObjectLiteralExpression)
                    die(ctx, node, "Object types can only be initalized with object literals.");
                return;
             }
@@ -623,13 +649,13 @@ function validateTopLevelAST(ctx: any) : void
     node.forEachChild(child =>
     {
         const k = child.kind;
-        if (k != ts.SyntaxKind.VariableStatement &&
-            k != ts.SyntaxKind.FunctionDeclaration &&
-            k != ts.SyntaxKind.EndOfFileToken)
+        if (k != Sym.VariableStatement &&
+            k != Sym.FunctionDeclaration &&
+            k != Sym.EndOfFileToken)
         {
             die(ctx, child, 
                 "Only variable declarations are allowed outside of a function. Found: " + 
-                    ts.SyntaxKind[child.kind] + ".");
+                    Sym[child.kind] + ".");
         }
     });
 }
@@ -754,7 +780,7 @@ printRecursiveFrom(srcfile, 0, srcfile);
 for (let s = 0; s < srcfile.statements.length; ++s)
 {
     const stmt = srcfile.statements[s];
- //   console.log(ts.SyntaxKind[stmt.kind])
+ //   console.log(Sym[stmt.kind])
     walk(stmt, 1);
 }
 */

@@ -1,0 +1,23 @@
+Design decisions:
+
+1.  The const keyword is not supported.
+        - Const has poorly defined meaning in TS to begin with.
+
+2.  Array types must be specified like so:
+        let a : Array<string> = ['a','b','c']       // initalized array
+        or
+        let a : Array<string> = Array<string>(10);  // blank initalized array
+
+3. There are no undefined variables:
+        A variable takes on a '0' or 'blank' value if not specified but it is never undefined.
+        This is because supporting union of type and undefined at runtime produces unwanted instruciton overhead.
+
+4. Placing a $ symbol in front of a hook api call such as $param causes the hook to rollback if the call fails.
+        Failing to place such a symbol causes the hook to continue executing on error...
+        With global: errno being populated with the error code.
+
+5. HookAPIs with a single output write buffer can be assigned to a variable of the appropriate type.
+        For example:
+            let i : int = hook_pos();
+            let a : Account = util_raddr(hook_param("admin_addr"));
+
