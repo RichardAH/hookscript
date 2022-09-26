@@ -36,7 +36,7 @@ function parseMethodSig(sig:string)
 }
 
 
-const hookapi:any = 
+const hookapi:any =
 (():void=>
 {
     const hookapiRaw = fs.readFileSync('hookapi.txt').toString('utf-8').
@@ -73,7 +73,7 @@ const hookapi:any =
 
             entry = entry.
                 replace(/i32 ([^_]*write)_ptr,i32 [^_]*write_len/g, 'wb $1');
-            
+
             entry = entry.
                 replace(/i32 ([^_]*read)_ptr,i32 [^_]*read_len/g, 'rb $1');
 
@@ -89,12 +89,12 @@ const hookapi:any =
             if (params == '')
                 params = 'void';
             const sig = params + '->' + retType;
-            ret['' + apiName] = 
+            ret['' + apiName] =
             {
                 raw: rawEntry,
                 ... parseMethodSig(sig)
             };
-            ret['$' + apiName] = 
+            ret['$' + apiName] =
             {
                 raw: rawEntry,
                 ... parseMethodSig(sig)
@@ -183,7 +183,7 @@ function walk(
 
     if (findKind === undefined || findKind[node.kind])
         visit(node);
-    
+
     node.forEachChild(child =>
     {
         walk(child, srcfile, findKind, visit);
@@ -211,8 +211,8 @@ function die(ctx:any, node:ts.Node, msg:string):void
 
 function inferImports(ctx: any) : void
 {
-    walk(ctx.srcfile, ctx.srcfile, [Sym.CallExpression], 
-    (node:any):void=> 
+    walk(ctx.srcfile, ctx.srcfile, [Sym.CallExpression],
+    (node:any):void=>
     {
         //console.log("walked to: ", node.getText(srcfile));
         const funcname = node.expression.escapedText;
@@ -268,12 +268,14 @@ const obj_types: any =
 {
     'Object': true,
     'Account': true,
-    'Amount': true
+    'Amount': true,
+    'BigObject': true
 }
 
-const aliased_types : any = 
+const aliased_types : any =
 {
-    'number': 'i32'
+    'number': 'i32',
+    'int' : 'i32'
 }
 
 const allowed_types:any =
@@ -297,6 +299,7 @@ const allowed_types:any =
     addTypes(float_types);
     addTypes(int_types);
     addTypes(obj_types);
+    addTypes(aliased_types);
     return out;
 })();
 
@@ -306,13 +309,13 @@ d(allowed_types, 2);
 function processFunctions(ctx: any) : void
 {
 
-    walk(ctx.srcfile, ctx.srcfile, [Sym.FunctionDeclaration], 
-    (node:any):void=> 
+    walk(ctx.srcfile, ctx.srcfile, [Sym.FunctionDeclaration],
+    (node:any):void=>
     {
         const funcname = node.name.escapedText;
 
         if (ctx.funcs[funcname] || ctx.macros[funcname])
-            die(ctx, node, "Duplicate function definition: " + funcname); 
+            die(ctx, node, "Duplicate function definition: " + funcname);
 
         const realfunc = funcname == 'hook' || funcname == 'cbak';
 
@@ -353,7 +356,7 @@ function processFunctions(ctx: any) : void
         if (realfunc && params.length != 1)
             die(ctx, node, "hook and cbak must have method signature i32->i64. [2]");
 
-        const rettype = (node.type === undefined ? 
+        const rettype = (node.type === undefined ?
                          "void" :
                          node.type.typeName.escapedText);
 
@@ -363,11 +366,11 @@ function processFunctions(ctx: any) : void
                 die(ctx, node, "hook and cbak must have method signature i32->i64. [3]");
         }
         else
-        {   
+        {
             if (rettype != 'void' && !allowed_types[rettype])
                 die(ctx, node, "in macro " + funcname + ", return type: " + rettype + " not supported.");
         }
-        
+
         const sig = (param_types.length == 0 ? 'void' : param_types.join(',')) + '->' + rettype;
 
         if (realfunc)
@@ -405,7 +408,7 @@ function validateAndShakeFunctions(ctx: any) : void
     let changed = false;
 
     const visitor =
-    (node:any):void=> 
+    (node:any):void=>
     {
         //console.log("walked to: ", node.getText(srcfile));
         const funcname = node.expression.escapedText;
@@ -433,7 +436,7 @@ function validateAndShakeFunctions(ctx: any) : void
         walk(func.body, ctx.srcfile, [Sym.CallExpression], visitor);
     }
 
-    do 
+    do
     {
         changed = false;
         for (let i = 0; i < ctx.macro_count; ++i)
@@ -458,19 +461,6 @@ function validateAndShakeFunctions(ctx: any) : void
     }
 }
 
-function processInitializers(ctx: any) : void
-{
-    // first process string literals
-    walk(ctx.srcfile, ctx.srcfile, [Sym.StringLiteral], 
-    (node:any):void=> 
-    {
-        // RH UPTO
-        // concat string literals together into a data blob to be emitted to wasm
-        // concat (non-string) array literals in the samw way
-//        d(node, 6);
-    });
-}
-
 
 function getTypeName(ctx:any, node:any) : string
 {
@@ -484,30 +474,12 @@ function getTypeName(ctx:any, node:any) : string
 
     if (node.typeName && node.typeName.escapedText)
         tn = node.typeName.escapedText;
-    else
-    if (node.type === undefined && node.initializer !== undefined)
-    {
-        const k = node.initializer.kind;
-        if (k == Sym.StringLiteral)
-            tn = "string";
-        else if (k == Sym.NumericLiteral)
-            tn = "number";
-        else if (k == Sym.ObjectLiteralExpression)
-            tn = "Object";
-        else if (k == Sym.NewExpression)
-        {
-           // d(node, 3);
-            console.log(Sym[k]);
-        }
-        // RH UPTO: array literal expression (and infer inner type)
-    }
 
     tn = tn.trim();
 
     if (tn.match(/^Array.*/) &&
         node.typeArguments && node.typeArguments[0])
     {
-        d(node, 3);
         if (node.typeArguments.length == 1)
         {
             const arg = node.typeArguments[0];
@@ -522,8 +494,6 @@ function getTypeName(ctx:any, node:any) : string
             else
                 inner = ctx.rawfile.substr(arg.pos, arg.end - arg.pos);
 
-            console.log("here");
-            d(node, 3);
             tn = "Array<" + inner.trim() + ">";
         }
     }
@@ -541,7 +511,7 @@ function getArrayInnerType(tn: string) : string | undefined
     return undefined;
 }
 
-function asString(ctx: any, node: ts.Node) : string
+function nodeToString(ctx: any, node: ts.Node) : string
 {
     let s = ctx.rawfile.substr(node.pos, node.end - node.pos).trim();
     s = s.replace(/\/\/.*/, '').trim();
@@ -553,26 +523,24 @@ function asString(ctx: any, node: ts.Node) : string
 function validateTypes(ctx: any) : void
 {
     walk(ctx.srcfile, ctx.srcfile,
-         [Sym.VariableStatement, Sym.VariableDeclaration, Sym.NewExpression, Sym.NewKeyword, Sym.ConstKeyword], 
-    (node:any):void=> 
+         [Sym.VariableStatement, Sym.VariableDeclaration, Sym.NewExpression, Sym.NewKeyword, Sym.ConstKeyword],
+    (node:any):void=>
     {
 
         const k = node.kind;
-        
+
         if (k != Sym.VariableDeclaration)
         {
-        
             if (k == Sym.NewKeyword || k == Sym.NewExpression)
                 die(ctx, node, "New keyword is not supported (try omitting it).");
-        
-            const rawnode = asString(ctx, node);
-            
+
+            const rawnode = nodeToString(ctx, node);
             if (k == Sym.ConstKeyword ||
                 rawnode.match(/(^| |\t)+const($| |\t)+/))
                 die(ctx, node, "Const keyword is not supported. Use let instead.");
             return;
         }
-        
+
 
         // VariableDeclaration
         const tn = getTypeName(ctx, node);
@@ -584,8 +552,14 @@ function validateTypes(ctx: any) : void
                 die(ctx, node, "Type `" + tn + "` is not supported.");
         }
 
-        const validateLiteral = (node:any, inner:string) : void =>
+        const validateLiteral = (node:any, inner:string, toplevel:any) : void =>
         {
+            if (toplevel)
+                walk(ctx.srcfile, node, [Sym.CallExpression], (node:any)=>
+                {
+                    die(ctx, node, "Call expressions are not supported in top level initializerss.");
+                });
+
             const k = node.kind;
             if (inner == 'string' || inner == 'bigstring')
             {
@@ -611,27 +585,55 @@ function validateTypes(ctx: any) : void
             if (inner in obj_types)
             {
                if (k != Sym.ObjectLiteralExpression)
-                   die(ctx, node, "Object types can only be initalized with object literals.");
+                   die(ctx, node, "Object types can only be initialized with object literals.");
+
                return;
             }
+
+            if (toplevel && !(k >= Sym.FirstLiteralToken && k <= Sym.LastLiteralToken))
+                die(ctx, node, "Top level variables must be initialized with literals.");
         }
+
+        if (!node.initializer)
+            die(ctx, node, "Variables must be initialized.");
 
         // if it's an array we should check initializer args (if any)
         const inner = getArrayInnerType('' + tn);
-        if (inner !== undefined && node.initializer && 
-            node.initializer.elements && node.initializer.elements.length > 0)
+        if (inner && node.initializer)
         {
-            const init = node.initializer.elements;
-            for (let i = 0; i < init.length; ++i)
-                validateLiteral(init[i], inner);
-            return;
-        }        
-        
-        // non-array, check initializer
-        if (node.initializer)
-            validateLiteral(node.initializer, tn);
+            // array semantics: var = [..., ...]
+            if (node.initializer.elements && node.initializer.elements.length > 0)
+            {
+                const init = node.initializer.elements;
+                for (let i = 0; i < init.length; ++i)
+                    validateLiteral(init[i], inner, node._toplevel);
+            }
+            // or call type semantics: var = Array<x>(..., ...)
+            else
+            if (node.initializer.arguments && node.initializer.arguments.length > 0)
+            {
+                if (node.initializer.arguments.length == 1 &&
+                    node.initializer.arguments[0].kind == Sym.NumericLiteral)
+                {
+                    // pass, this is like Array<string>(10);
+                    // i.e. blank init
+                }
+                else
+                {
+                    const init = node.initializer.arguments;
+                    for (let i = 0; i < init.length; ++i)
+                        validateLiteral(init[i], inner, node._toplevel);
+                }
+            }
+            else
+                die(ctx, node, "Array types must be initialized");
+        }
 
-        node.validedTypeName = tn;
+        // non-array, check initializer
+        validateLiteral(node.initializer, tn, node._toplevel);
+
+        node._typename = tn;
+        node._inner = inner;
     });
 
 }
@@ -653,22 +655,108 @@ function validateTopLevelAST(ctx: any) : void
             k != Sym.FunctionDeclaration &&
             k != Sym.EndOfFileToken)
         {
-            die(ctx, child, 
-                "Only variable declarations are allowed outside of a function. Found: " + 
+            die(ctx, child,
+                "Only variable declarations are allowed outside of a function. Found: " +
                     Sym[child.kind] + ".");
         }
+
+        (child as any)._toplevel = true;
+        walk((child as ts.Node), ctx.srcfile, undefined, (node:any)=>{
+            node._toplevel = true;
+        });
     });
 }
 
-let ctx:any = 
+let dataseg : any = {};
+
+function processIninitializers(ctx: any) : void
+{
+    walk(ctx.srcfile, ctx.srcfile,
+         [Sym.VariableDeclaration],
+    (node:any):void=>
+    {
+        if (node.initializer === undefined)
+            die(ctx, node, "Variables must be initialized.");
+
+        const init = node.initializer;
+
+
+
+        const isTopLevel = !!((node as any)['_toplevel']);
+        const tn = node._typename;
+
+        if (tn === undefined)
+            die(ctx, node, "Could not determine type of variable.");
+
+        if (init.kind == Sym.CallExpression)
+        {
+            // RHTODO: move this to validateTypes
+            // RHTODO: initialize on demand not ahead of time, remove this function
+            // call expression *must* be a constructor of the same type
+            let ctn:string = init.expression.escapedText.trim();
+            if (init.typeArguments.length == 1)
+               ctn += '<' + nodeToString(ctx, init.typeArguments) + '>'.trim();
+
+            if (ctn != tn)
+                die(ctx, node, "Variables can only be initialized via a constructor of their own type.");
+
+            //d(node, 4);
+            if (node._inner)
+            {
+
+                // array
+                let count = 0;
+                let fill = [];
+
+                if (init.arguments.length == 1 && init.arguments[0].kind == Sym.NumericLiteral &&
+                   !init.arguments[0].text.match(/\./))
+                    count = parseInt(init.arguments[0].text);
+                else
+                {
+                    // = Array<X>(1,2,3); // prefilled array
+                    count = init.arguments.length;
+                    // RHUPTO   how are we handling Array<STObject>({},{...}, ...)
+                }
+
+            }
+        }
+        else
+        {
+            // non-call expression, must be some sort of literal
+        }
+
+        if (node._inner)
+        {
+            // array type
+        }
+        else
+        {
+            // non-array type
+        }
+//        console.log(tn);
+
+
+    });
+}
+
+
+function tagAll(ctx:any) : void
+{
+    walk(ctx.srcfile, ctx.srcfile, undefined,
+    (node:any):void=>
+    {
+        node._raw = nodeToString(ctx, node);
+    });
+}
+let ctx:any =
 {
     filename: filename,
     rawfile: rawfile,
     srcfile: srcfile,
-    
+
     /* types as they will appear in the output wasm, with the first type prefilled for hook & cbak */
-    types: { 
-        "i32->i64" : 0 
+    types: {
+        "i32->i64" : 0
     },
     types_map: {
         0: "i32->i64"
@@ -695,6 +783,7 @@ let ctx:any =
     globals_count: 0
 };
 
+tagAll(ctx);
 validateTopLevelAST(ctx);
 validateTypes(ctx);
 
@@ -703,9 +792,8 @@ processFunctions(ctx);
 
 validateAndShakeFunctions(ctx); // remove all unused/unreferenced macros
 
-processInitializers(ctx); 
+processIninitializers(ctx);
 
-//processData(ctx);
 
 //process.exit(0);
 
@@ -719,7 +807,7 @@ for (let i = 0; i < ctx.type_count; ++i)
     console.log("  " +
         "(type (;" + i + ";) " +
         "(func " +
-            (type.params.length > 0 ? 
+            (type.params.length > 0 ?
             "(param " + type.params.join(' ') + ") " : "") +
             "(result " + type.rettype + ")))");
 }
@@ -745,7 +833,7 @@ for (let i = 0; i < ctx.func_count; ++i)
     console.log("  " +
         "(func (;" + i + ";) " +
         "(type " + func.typeidx + ") " +
-            (type.params.length > 0 ? 
+            (type.params.length > 0 ?
             "(param " + type.params.join(' ') + ") " : "") +
             "(result " + type.rettype + ")");
     // code generation here
