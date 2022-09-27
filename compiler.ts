@@ -278,6 +278,19 @@ const aliased_types : any =
     'int' : 'i32'
 }
 
+// this can be queried to see if a type can go into a local/global variable as opposed to memory
+const primitive_types : any = 
+(():any=>{
+
+    let out = {...int_types, ...float_types};
+    for (let t in aliased_types)
+    {
+        if (aliased_types[t] in out)
+            out[t] = true;
+    }
+    return out;
+})();
+
 const allowed_types:any =
 (():any=>
 {
@@ -380,7 +393,7 @@ function processFunctions(ctx: any) : void
                 idx: ctx.func_count,
                 name: funcname,
                 type: parseMethodSig(sig),
-                body: node.body,
+                node: node,
                 typeidx: 0,         // hard coded always the hook/cbak type
             }
             ctx.funcs_map[ctx.func_count++] = funcname;
@@ -392,7 +405,7 @@ function processFunctions(ctx: any) : void
                 idx: ctx.macro_count,
                 name: funcname,
                 type: parseMethodSig(sig),
-                body: node.body
+                node: node
             }
             ctx.macros_map[ctx.macro_count++] = funcname;
         }
@@ -557,7 +570,8 @@ function validateTypes(ctx: any) : void
             if (toplevel)
                 walk(ctx.srcfile, node, [Sym.CallExpression], (node:any)=>
                 {
-                    die(ctx, node, "Call expressions are not supported in top level initializerss.");
+                    die(ctx, node, "Call expressions are not supported in top level initializers. " +
+                       "Use = [a,b,...] instead.");
                 });
 
             const k = node.kind;
@@ -590,12 +604,14 @@ function validateTypes(ctx: any) : void
                return;
             }
 
+            
             if (toplevel && !(k >= Sym.FirstLiteralToken && k <= Sym.LastLiteralToken))
                 die(ctx, node, "Top level variables must be initialized with literals.");
         }
 
         if (!node.initializer)
             die(ctx, node, "Variables must be initialized.");
+
 
         // if it's an array we should check initializer args (if any)
         const inner = getArrayInnerType('' + tn);
@@ -628,9 +644,21 @@ function validateTypes(ctx: any) : void
             else
                 die(ctx, node, "Array types must be initialized");
         }
+        
+        if (node.initializer.kind == Sym.CallExpression)
+        {
+            // call expression *must* be a constructor of the same type
+            let ctn:string = node.initializer.expression.escapedText.trim();
+            if (node.initializer.typeArguments.length == 1)
+               ctn += '<' + nodeToString(ctx, node.initializer.typeArguments) + '>';
+
+            if (ctn != tn)
+                die(ctx, node, "Variables can only be node.initializerialized via a constructor of their own type.");
+        }
 
         // non-array, check initializer
-        validateLiteral(node.initializer, tn, node._toplevel);
+        if (inner === undefined)
+            validateLiteral(node.initializer, tn, node._toplevel);
 
         node._typename = tn;
         node._inner = inner;
@@ -669,6 +697,7 @@ function validateTopLevelAST(ctx: any) : void
 
 let dataseg : any = {};
 
+/*
 function processIninitializers(ctx: any) : void
 {
     walk(ctx.srcfile, ctx.srcfile,
@@ -738,7 +767,7 @@ function processIninitializers(ctx: any) : void
 
     });
 }
-
+*/
 
 function tagAll(ctx:any) : void
 {
@@ -746,6 +775,8 @@ function tagAll(ctx:any) : void
     (node:any):void=>
     {
         node._raw = nodeToString(ctx, node);
+        if (node.kind !== undefined)
+            node._tn = Sym[node.kind];
     });
 }
 let ctx:any =
@@ -772,16 +803,55 @@ let ctx:any =
     funcs: {},
     funcs_map: {},      // idx -> key
     func_count : 0,
+    
 
     /* macros are user defined functions that are always inlined */
     macros: {},
     macros_map: {},     // idx -> key
-    macro_count: 0,
-
-    globals: {},
-    globals_map: {},
-    globals_count: 0
+    macro_count: 0
 };
+
+function processVariableStatement(ctx: any, node: any, varmap: any, suppress_output:boolean): void
+{
+    if (!node.declarationList || 
+        !node.declarationList.declarations || 
+         node.declarationList.declarations.length <= 0)
+    {
+        console.log("Warn: variable statement without declaration list");
+        return;
+    }
+
+    const decl = node.declarationList.declarations;
+
+    for (let i = 0; i < decl.length; ++i)
+    {
+        const name = decl[i].name.escapedText;
+        if (varmap[name] !== undefined)
+            die(ctx, node, "Variable " + name + " declared more than once.");
+        varmap[decl[i].name.escapedText.trim()] = decl[i];
+        if (suppress_output)
+            continue;
+
+        
+    }
+}
+
+function collectVariablesAtTopLevel(ctx:any):void
+{
+    let varmap:any = {};
+
+    (ctx.srcfile as ts.Node).forEachChild(child =>
+    {
+        const node:any = (child as ts.Node);
+    
+        if (node.kind != Sym.VariableStatement)
+            return;
+
+        processVariableStatement(ctx, node, varmap, true);
+    });
+
+    return varmap;
+}
 
 tagAll(ctx);
 validateTopLevelAST(ctx);
@@ -792,7 +862,7 @@ processFunctions(ctx);
 
 validateAndShakeFunctions(ctx); // remove all unused/unreferenced macros
 
-processIninitializers(ctx);
+//processIninitializers(ctx);
 
 
 //process.exit(0);
@@ -824,9 +894,93 @@ for (let i = 0; i < ctx.import_count; ++i)
     );
 }
 
+function processExpression(ctx:any, func:any, expr:any, varmap:any):void
+{
+    const k = expr.kind; 
+//    console.log("=>> processExpression " + Sym[k] + "<<=");
+    switch (k)
+    {
+        case Sym.NumericLiteral:
+        {
+            let rettype = "i64";
+            if (func)
+                rettype = func.type.rettype;
+            console.log("    " + rettype + ".const " + expr.text.trim());
+            return;
+        }
+        case Sym.BigIntLiteral:
+        case Sym.StringLiteral:
+        case Sym.RegularExpressionLiteral:
+        case Sym.NoSubstitutionTemplateLiteral:
+        case Sym.TypeLiteral:
+        case Sym.LiteralType:
+        //case Sym.TemplateLiteralType:
+        //case Sym.TemplateLiteralTypeSpan:
+        case Sym.ArrayLiteralExpression:
+        case Sym.ObjectLiteralExpression:
+        case Sym.JSDocTypeLiteral:
+        default:
+            die(ctx, expr, "Unknown expression type: " + Sym[k]);
+    }
+}
+
+function processStatement(ctx:any, func:any, stmt:any, varmap:any):void
+{
+    const k = stmt.kind;
+//    console.log("=>> processStatement " + Sym[k] + "<<=");
+    switch (k)
+    {
+        case Sym.EmptyStatement:
+            return;
+
+        case Sym.VariableStatement:
+        {
+            processVariableStatement(ctx, stmt, varmap, false);
+            return;
+        }
+        case Sym.ExpressionStatement:
+        {
+            return;
+        }
+        case Sym.IfStatement:
+        case Sym.DoStatement:
+        case Sym.WhileStatement:
+        case Sym.ForStatement:
+        case Sym.ForInStatement:
+        case Sym.ForOfStatement:
+        case Sym.ContinueStatement:
+        case Sym.BreakStatement:
+        {
+            die(ctx, stmt, "Unknown statement type: " + Sym[k]);
+        }
+        case Sym.ReturnStatement:
+        {
+            if (stmt.expression)
+                processExpression(ctx, func, stmt.expression, varmap);
+            console.log("    return");
+            return;
+        }
+
+        case Sym.WithStatement:
+        case Sym.SwitchStatement:
+        case Sym.LabeledStatement:
+        case Sym.ThrowStatement:
+        case Sym.TryStatement:
+        case Sym.DebuggerStatement:
+        case Sym.NotEmittedStatement:
+        default:
+            die(ctx, stmt, "Unknown statement type: " + Sym[k]);
+    }
+}
+
 // output funcs
 for (let i = 0; i < ctx.func_count; ++i)
 {
+
+    // setup a variable map
+    let varmap : any =
+        collectVariablesAtTopLevel(ctx);
+
     const funcname = ctx.funcs_map[i];
     const func = ctx.funcs[funcname];
     const type = func.type;
@@ -836,16 +990,63 @@ for (let i = 0; i < ctx.func_count; ++i)
             (type.params.length > 0 ?
             "(param " + type.params.join(' ') + ") " : "") +
             "(result " + type.rettype + ")");
-    // code generation here
+    // collect local parameters
+
+    let localidx = 0;
+    let paramcount = 0;
+    if (func.node.parameters && func.node.parameters.length)
+    {
+        const params = func.node.parameters;
+        for (let i = 0; i < params.length; ++i)
+        {
+            const param : any = params[i];
+            varmap[param.name.escapedText.trim()] = param;
+            param._localidx = localidx++;
+        }
+        paramcount = params.length;
+    }
+
+    // tag locals
+    let localsout = "";
+    walk(func.node.body, ctx.srcfile, [Sym.VariableStatement], (node:any):void=>
+    {
+        if (node.declarationList && node.declarationList.declarations &&
+            node.declarationList.declarations.length >= 0)
+        {
+            const decls = node.declarationList.declarations;
+            for (let i = 0; i < decls.length; ++i)
+            {
+                let tn = getTypeName(ctx, decls[i]);
+                if (primitive_types[tn])
+                {
+                    if (aliased_types[tn])
+                        tn = aliased_types[tn];
+                    localsout += (localsout == "" ? "" : " ") + tn;
+                    decls[i]._localidx = localidx++;
+                }
+            }
+        }
+    });
+
+    console.log("    (local " + localsout + ")");
+
+    // statement iteration
+    if (!func.node.body || !func.node.body.statements || func.node.body.statements.length <= 0)
+        die(ctx, func.node, "Empty functions are not supported.");
+
+    const stmts = func.node.body.statements;
+
+    for (let i = 0; i < stmts.length; ++i)
+        processStatement(ctx, func, stmts[i], varmap);
+    
+    //d(func.node, 2);
+
     console.log("  )");
 }
 
 // output memory
 console.log('  (memory (;0;) 2)');
 
-
-// output globals
-// TODO
 
 // output exports
 for (let i = 0; i < ctx.func_count; ++i)
@@ -862,7 +1063,7 @@ for (let i = 0; i < ctx.func_count; ++i)
 console.log(')');
 
 
-printRecursiveFrom(srcfile, 0, srcfile);
+//printRecursiveFrom(srcfile, 0, srcfile);
 //d(ctx, 4);
 /*
 for (let s = 0; s < srcfile.statements.length; ++s)
