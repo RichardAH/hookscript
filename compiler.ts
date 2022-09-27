@@ -3,7 +3,7 @@ import * as fs from 'fs';
 
 if (process.argv.length != 3)
 {
-    console.log("usage: " + process.argv[1] + " somefile.hs");
+    console.error("usage: " + process.argv[1] + " somefile.hs");
     process.exit(1);
 }
 
@@ -69,8 +69,6 @@ const hookapi:any =
                 replace(/, */g, ',');
 
 
-            //console.log("b-entry", entry)
-
             entry = entry.
                 replace(/i32 ([^_]*write)_ptr,i32 [^_]*write_len/g, 'wb $1');
 
@@ -111,61 +109,8 @@ const srcfile = ts.createSourceFile(
     filename, rawfile, ts.ScriptTarget.Latest
 );
 
-
-const markers:any =
-{
-    "FirstAssignment": "EqualsToken",
-    "LastAssignment": "CaretEqualsToken",
-    "FirstCompoundAssignment": "PlusEqualsToken",
-    "LastCompoundAssignment": "CaretEqualsToken",
-    "FirstReservedWord": "BreakKeyword",
-    "LastReservedWord": "WithKeyword",
-    "FirstKeyword": "BreakKeyword",
-    "LastKeyword": "OfKeyword",
-    "FirstFutureReservedWord": "ImplementsKeyword",
-    "LastFutureReservedWord": "YieldKeyword",
-    "FirstTypeNode": "TypePredicate",
-    "LastTypeNode": "ImportType",
-    "FirstPunctuation": "OpenBraceToken",
-    "LastPunctuation": "CaretEqualsToken",
-    "FirstToken": "Unknown",
-    "LastToken": "LastKeyword",
-    "FirstTriviaToken": "SingleLineCommentTrivia",
-    "LastTriviaToken": "ConflictMarkerTrivia",
-    "FirstLiteralToken": "NumericLiteral",
-    "LastLiteralToken": "NoSubstitutionTemplateLiteral",
-    "FirstTemplateToken": "NoSubstitutionTemplateLiteral",
-    "LastTemplateToken": "TemplateTail",
-    "FirstBinaryOperator": "LessThanToken",
-    "LastBinaryOperator": "CaretEqualsToken",
-    "FirstStatement": "VariableStatement",
-    "LastStatement": "DebuggerStatement",
-    "FirstNode": "QualifiedName",
-    "FirstJSDocNode": "JSDocTypeExpression",
-    "LastJSDocNode": "JSDocPropertyTag",
-    "FirstJSDocTagNode": "JSDocTag",
-    "LastJSDocTagNode": "JSDocPropertyTag",
-    "FirstContextualKeyword": "AbstractKeyword",
-    "LastContextualKeyword": "OfKeyword"
-};
-function printRecursiveFrom(
-    node: ts.Node, indentLevel: number, srcfile: ts.SourceFile
-) {
-    const indentation = "-".repeat(indentLevel);
-    let syntaxKind = Sym[node.kind];
-    if (markers[syntaxKind] != undefined)
-        syntaxKind = markers[syntaxKind];
-
-    const nodeText = node.getText(srcfile);
-    console.log(`${indentation}${syntaxKind}: ${nodeText}`);
-
-    node.forEachChild(child =>
-        printRecursiveFrom(child, indentLevel + 1, srcfile)
-    );
-}
-
 function walk(
-    node: ts.Node, srcfile: ts.SourceFile, findKind: any, visit: (node:ts.Node)=>void ) : void
+    node: ts.Node, srcfile: ts.SourceFile, findKind: any, visit: any ) : void
 {
     if (node === undefined || node.kind === undefined)
         return;
@@ -182,7 +127,11 @@ function walk(
     }
 
     if (findKind === undefined || findKind[node.kind])
-        visit(node);
+    {
+        const cont = visit(node);
+        if (cont === true)
+            return;
+    }
 
     node.forEachChild(child =>
     {
@@ -203,8 +152,8 @@ function die(ctx:any, node:ts.Node, msg:string):void
     console.error(
         "Error: " +
         ctx.filename + ":" + lineno + " " +
-        msg + " " +
-        "Near: `" + node.getText(ctx.srcfile) + "`",
+        msg + ". " +
+        "Near: `" + node.getText(ctx.srcfile) + "`.",
     );
     process.exit(1);
 }
@@ -212,9 +161,8 @@ function die(ctx:any, node:ts.Node, msg:string):void
 function inferImports(ctx: any) : void
 {
     walk(ctx.srcfile, ctx.srcfile, [Sym.CallExpression],
-    (node:any):void=>
+    (node:any) =>
     {
-        //console.log("walked to: ", node.getText(srcfile));
         const funcname = node.expression.escapedText;
 
         if (!hookapi[funcname])
@@ -237,7 +185,6 @@ function inferImports(ctx: any) : void
             };
             ctx.imports_map[ctx.import_count++] = funcname;
         }
-        //console.log("function: `" + funcname + "`, sig: `" + hookapi[funcname].typekey + "`");
     });
 }
 
@@ -248,10 +195,6 @@ const string_types: any =
     'bigstring': true
 }
 
-const float_types: any =
-{
-    'xfl': true
-}
 const int_types: any =
 {
     'i8' : true,
@@ -275,14 +218,15 @@ const obj_types: any =
 const aliased_types : any =
 {
     'number': 'i32',
-    'int' : 'i32'
+    'int' : 'i32',
+    'xfl' : 'i64'
 }
 
 // this can be queried to see if a type can go into a local/global variable as opposed to memory
 const primitive_types : any = 
 (():any=>{
 
-    let out = {...int_types, ...float_types};
+    let out = {...int_types};
     for (let t in aliased_types)
     {
         if (aliased_types[t] in out)
@@ -309,15 +253,11 @@ const allowed_types:any =
     }
 
     addTypes(string_types);
-    addTypes(float_types);
     addTypes(int_types);
     addTypes(obj_types);
     addTypes(aliased_types);
     return out;
 })();
-
-d(allowed_types, 2);
-
 
 function processFunctions(ctx: any) : void
 {
@@ -423,7 +363,6 @@ function validateAndShakeFunctions(ctx: any) : void
     const visitor =
     (node:any):void=>
     {
-        //console.log("walked to: ", node.getText(srcfile));
         const funcname = node.expression.escapedText;
 
         if (funcname == 'hook' || funcname == 'cbak')
@@ -475,7 +414,7 @@ function validateAndShakeFunctions(ctx: any) : void
 }
 
 
-function getTypeName(ctx:any, node:any) : string
+function getTypeName(ctx:any, node:any, extra:any = {}) : string
 {
     if (!node)
         return "any";
@@ -486,9 +425,7 @@ function getTypeName(ctx:any, node:any) : string
     let tn = "any";
 
     if (node.typeName && node.typeName.escapedText)
-        tn = node.typeName.escapedText;
-
-    tn = tn.trim();
+        tn = node.typeName.escapedText.trim();
 
     if (tn.match(/^Array.*/) &&
         node.typeArguments && node.typeArguments[0])
@@ -501,17 +438,28 @@ function getTypeName(ctx:any, node:any) : string
 
             if (arg.typeName &&
                 arg.typeName.escapedText)
-                inner = arg.typeName.escapedText;
+                inner = arg.typeName.escapedText.trim();
             else if (arg.typeName)
-                inner = ctx.rawfile.substr(arg.typeName.pos, arg.typeName.end - arg.typeName.pos);
+                inner = ctx.rawfile.substr(arg.typeName.pos, arg.typeName.end - arg.typeName.pos).trim();
             else
-                inner = ctx.rawfile.substr(arg.pos, arg.end - arg.pos);
+                inner = ctx.rawfile.substr(arg.pos, arg.end - arg.pos).trim();;
 
-            tn = "Array<" + inner.trim() + ">";
+           
+            if (aliased_types[inner])
+                inner = aliased_types[inner];
+
+            tn = "Array<" + inner + ">";
         }
     }
 
-    return tn.trim();
+
+    if (aliased_types[tn] && extra.noalias)
+        tn = aliased_types[tn];
+
+    if (tn == 'xfl' && extra.noalias)
+        tn = 'i64';
+
+    return tn;
 }
 
 function getArrayInnerType(tn: string) : string | undefined
@@ -652,7 +600,6 @@ function validateTypes(ctx: any) : void
             if (node.initializer.typeArguments.length == 1)
                ctn += '<' + nodeToString(ctx, node.initializer.typeArguments) + '>';
 
-            if (ctn != tn)
                 die(ctx, node, "Variables can only be node.initializerialized via a constructor of their own type.");
         }
 
@@ -690,84 +637,14 @@ function validateTopLevelAST(ctx: any) : void
 
         (child as any)._toplevel = true;
         walk((child as ts.Node), ctx.srcfile, undefined, (node:any)=>{
+            if (child.kind == Sym.FunctionDeclaration)
+                return true;
             node._toplevel = true;
         });
     });
 }
 
 let dataseg : any = {};
-
-/*
-function processIninitializers(ctx: any) : void
-{
-    walk(ctx.srcfile, ctx.srcfile,
-         [Sym.VariableDeclaration],
-    (node:any):void=>
-    {
-        if (node.initializer === undefined)
-            die(ctx, node, "Variables must be initialized.");
-
-        const init = node.initializer;
-
-
-
-        const isTopLevel = !!((node as any)['_toplevel']);
-        const tn = node._typename;
-
-        if (tn === undefined)
-            die(ctx, node, "Could not determine type of variable.");
-
-        if (init.kind == Sym.CallExpression)
-        {
-            // RHTODO: move this to validateTypes
-            // RHTODO: initialize on demand not ahead of time, remove this function
-            // call expression *must* be a constructor of the same type
-            let ctn:string = init.expression.escapedText.trim();
-            if (init.typeArguments.length == 1)
-               ctn += '<' + nodeToString(ctx, init.typeArguments) + '>'.trim();
-
-            if (ctn != tn)
-                die(ctx, node, "Variables can only be initialized via a constructor of their own type.");
-
-            //d(node, 4);
-            if (node._inner)
-            {
-
-                // array
-                let count = 0;
-                let fill = [];
-
-                if (init.arguments.length == 1 && init.arguments[0].kind == Sym.NumericLiteral &&
-                   !init.arguments[0].text.match(/\./))
-                    count = parseInt(init.arguments[0].text);
-                else
-                {
-                    // = Array<X>(1,2,3); // prefilled array
-                    count = init.arguments.length;
-                    // RHUPTO   how are we handling Array<STObject>({},{...}, ...)
-                }
-
-            }
-        }
-        else
-        {
-            // non-call expression, must be some sort of literal
-        }
-
-        if (node._inner)
-        {
-            // array type
-        }
-        else
-        {
-            // non-array type
-        }
-//        console.log(tn);
-
-
-    });
-}
-*/
 
 function tagAll(ctx:any) : void
 {
@@ -776,7 +653,7 @@ function tagAll(ctx:any) : void
     {
         node._raw = nodeToString(ctx, node);
         if (node.kind !== undefined)
-            node._tn = Sym[node.kind];
+            node._sym = Sym[node.kind];
     });
 }
 let ctx:any =
@@ -811,27 +688,57 @@ let ctx:any =
     macro_count: 0
 };
 
-function processVariableStatement(ctx: any, node: any, varmap: any, suppress_output:boolean): void
+function setLocal(ctx:any, func:any, decl:any):void
+{
+    console.log("    local.set " + decl._localidx);
+}
+
+function processVariableStatement(ctx: any, func:any, node: any, varmap: any, suppress_output:boolean): void
 {
     if (!node.declarationList || 
         !node.declarationList.declarations || 
          node.declarationList.declarations.length <= 0)
     {
-        console.log("Warn: variable statement without declaration list");
+        console.error("Warn: variable statement without declaration list");
         return;
     }
 
-    const decl = node.declarationList.declarations;
+    const decls = node.declarationList.declarations;
 
-    for (let i = 0; i < decl.length; ++i)
+    for (let i = 0; i < decls.length; ++i)
     {
-        const name = decl[i].name.escapedText;
-        if (varmap[name] !== undefined)
-            die(ctx, node, "Variable " + name + " declared more than once.");
-        varmap[decl[i].name.escapedText.trim()] = decl[i];
+        const decl = decls[i];
+
+        const name = decl.name.escapedText.trim();
+        const tn = getTypeName(ctx, decl, {noalias:true});
+        
+        if (varmap[name] != decl)
+        {
+            if (varmap[name] !== undefined)
+                die(ctx, node, "Variable " + name + " declared more than once.");
+
+            decl._tn = tn;
+            varmap[name] = decl;
+        }
+
+        if (decl.initializer === undefined)
+            die(ctx, decl, "Initializer missing. All variables must be initialized.");
+
         if (suppress_output)
             continue;
 
+        if (primitive_types[tn])
+        {
+            //function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = {}):void
+            processExpression(ctx, func, decl.initializer, varmap, {rettype: tn});
+            setLocal(ctx, func, decl);
+
+        }
+        else
+        {
+        }
+        // RH TODO: processExpression onto stack and store in variable iff local
+        // processExpression onto stack and store in memory if not local
         
     }
 }
@@ -847,7 +754,7 @@ function collectVariablesAtTopLevel(ctx:any):void
         if (node.kind != Sym.VariableStatement)
             return;
 
-        processVariableStatement(ctx, node, varmap, true);
+        processVariableStatement(ctx, {}, node, varmap, true);
     });
 
     return varmap;
@@ -861,11 +768,6 @@ inferImports(ctx);
 processFunctions(ctx);
 
 validateAndShakeFunctions(ctx); // remove all unused/unreferenced macros
-
-//processIninitializers(ctx);
-
-
-//process.exit(0);
 
 console.log('(module');
 
@@ -894,18 +796,63 @@ for (let i = 0; i < ctx.import_count; ++i)
     );
 }
 
-function processExpression(ctx:any, func:any, expr:any, varmap:any):void
+// returns the type of the expression if available
+// extra.tee    -- use local.tee instead of local.get
+// extra.noout  -- do not generate code
+function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = {}):any
 {
     const k = expr.kind; 
-//    console.log("=>> processExpression " + Sym[k] + "<<=");
+    console.error("=>> processExpression " + Sym[k] + "<<=");
     switch (k)
     {
+        case Sym.Identifier:
+        {
+            const name = expr.escapedText.trim();
+            if (!varmap[name])
+                die(ctx, expr, "Identifier " + name + " not understood. Missing variable declaration?");
+
+            const node:any = varmap[name];
+            if (node._localidx)
+            {
+                // it's a local variable
+                console.error("==>variable: " + name);
+
+                // todo: is it a get or a set operation??
+                const instr = (extra.tee ? "local.tee" : "local.get");
+                if (!extra.noout)
+                    console.log("    " + instr + " " + node._localidx);
+                return node._tn;
+            }
+            else
+            {
+                // it's a memory variable
+            }
+            return;
+        }
         case Sym.NumericLiteral:
         {
             let rettype = "i64";
-            if (func)
-                rettype = func.type.rettype;
-            console.log("    " + rettype + ".const " + expr.text.trim());
+            if (extra.rettype)
+                rettype = extra.rettype;
+            let nl:any;
+            try
+            {
+                nl = parseInt(''+ expr.text.trim());
+            }
+            catch (e)
+            {
+                die(ctx, expr, "NumericalLiteral was not parsable.");
+            }
+
+            if (rettype.substr(0,1) == 'i')
+            {
+                const bits = Math.ceil(Math.log(nl)/Math.log(2));
+                if (bits > parseInt(rettype.substr(1)))
+                    die(ctx, expr, "Numeric literal was larger than " + rettype + " can hold.");
+            }
+
+            if (!extra.noout)
+                console.log("    " + rettype + ".const " + expr.text.trim());
             return;
         }
         case Sym.BigIntLiteral:
@@ -914,11 +861,118 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any):void
         case Sym.NoSubstitutionTemplateLiteral:
         case Sym.TypeLiteral:
         case Sym.LiteralType:
-        //case Sym.TemplateLiteralType:
-        //case Sym.TemplateLiteralTypeSpan:
         case Sym.ArrayLiteralExpression:
         case Sym.ObjectLiteralExpression:
         case Sym.JSDocTypeLiteral:
+
+        case Sym.ArrayLiteralExpression:
+        case Sym.ObjectLiteralExpression:
+        case Sym.PropertyAccessExpression:
+        case Sym.ElementAccessExpression:
+        case Sym.CallExpression:
+        {
+            if (expr.expression.kind != Sym.Identifier)
+                die(ctx, expr, "Functions must be called using literals. Function pointers are not supported.");
+
+            const id = expr.expression.escapedText.trim();
+
+            let funcno;
+
+            if (ctx.funcs[id])
+                die(ctx, expr, "Calling hook/cbak is not supported.");
+            else
+            if (ctx.macros[id])
+                die(ctx, expr, "Macros not yet implemented.");
+            else
+            if (hookapi[id])
+                die(ctx, expr, "not yet implemented.");
+            else
+                die(ctx, expr, "Unknown function: `" + id + "`");
+
+            if (!extra.noout)
+
+            console.log('    call ' + funcno);
+            // RH UPTO
+            d(expr,3 );
+            return;
+        }
+        case Sym.NewExpression:
+        {
+            die(ctx, expr, "New keyword is not supported.");
+        }
+        case Sym.TaggedTemplateExpression:
+        case Sym.TypeAssertionExpression:
+        {
+            die(ctx, expr, "Unknown expression type: " + Sym[k]);
+
+        }
+        case Sym.ParenthesizedExpression:
+        {
+            processExpression(ctx, func, expr.expression, varmap, extra);
+            return;
+        }
+        case Sym.FunctionExpression:
+        case Sym.DeleteExpression:
+        case Sym.TypeOfExpression:
+        case Sym.VoidExpression:
+        case Sym.AwaitExpression:
+        case Sym.PrefixUnaryExpression:
+        case Sym.PostfixUnaryExpression:
+        {
+
+            die(ctx, expr, "Unknown expression type: " + Sym[k]);
+        }
+        case Sym.BinaryExpression:
+        {
+            const op = expr.operatorToken.kind;
+
+            if (op == Sym.EqualsToken)
+            {   
+                //assignment operator requires a tee here
+                //and operations need to be done in reverse order
+                const tn = processExpression(ctx, func, expr.left, varmap, {noout:true});
+                processExpression(ctx, func, expr.right, varmap, {rettype:tn});
+                processExpression(ctx, func, expr.left, varmap, {tee: true});
+
+                if (!extra.rettype)
+                    return;
+
+                const havebits = tn.substr(1);
+                const wantbits = extra.rettype.substr(1);
+
+                const s = tn.substr(0,1) == 's' || extra.rettype.substr(0,1) == 's' ? 's' : 'u';
+            
+                if (havebits != wantbits)
+                {
+                    if (havebits == '32')
+                        console.log('    i64.extend_i32_' + s);
+                    else
+                        console.log('    i32.trunc_i64_' + s);
+                }
+                return;
+            }
+
+            processExpression(ctx, func, expr.left, varmap, extra);
+            processExpression(ctx, func, expr.right, varmap);
+//            processOperator(ctx, func, expr, op, varmap);
+            return;
+        }
+        case Sym.ConditionalExpression:
+        case Sym.TemplateExpression:
+        case Sym.YieldExpression:
+        case Sym.ClassExpression:
+        case Sym.OmittedExpression:
+        case Sym.ExpressionWithTypeArguments:
+        case Sym.AsExpression:
+        case Sym.NonNullExpression:
+        case Sym.SyntheticExpression:
+        case Sym.ExpressionStatement:
+        case Sym.JsxExpression:
+        case Sym.JSDocTypeExpression:
+        case Sym.PartiallyEmittedExpression:
+        case Sym.CommaListExpression:
+        case Sym.SyntheticReferenceExpression:
+
         default:
             die(ctx, expr, "Unknown expression type: " + Sym[k]);
     }
@@ -927,7 +981,7 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any):void
 function processStatement(ctx:any, func:any, stmt:any, varmap:any):void
 {
     const k = stmt.kind;
-//    console.log("=>> processStatement " + Sym[k] + "<<=");
+    console.error("=>> processStatement " + Sym[k] + "<<=");
     switch (k)
     {
         case Sym.EmptyStatement:
@@ -935,11 +989,15 @@ function processStatement(ctx:any, func:any, stmt:any, varmap:any):void
 
         case Sym.VariableStatement:
         {
-            processVariableStatement(ctx, stmt, varmap, false);
+            processVariableStatement(ctx, func, stmt, varmap, false);
             return;
         }
         case Sym.ExpressionStatement:
         {
+            const tn = processExpression(ctx, func, stmt.expression, varmap);
+            // if there's a type left over on the stack, drop it
+            if (tn)
+                console.log("    drop");
             return;
         }
         case Sym.IfStatement:
@@ -956,7 +1014,7 @@ function processStatement(ctx:any, func:any, stmt:any, varmap:any):void
         case Sym.ReturnStatement:
         {
             if (stmt.expression)
-                processExpression(ctx, func, stmt.expression, varmap);
+                processExpression(ctx, func, stmt.expression, varmap, {rettype: func.type.rettype});
             console.log("    return");
             return;
         }
@@ -1002,6 +1060,7 @@ for (let i = 0; i < ctx.func_count; ++i)
             const param : any = params[i];
             varmap[param.name.escapedText.trim()] = param;
             param._localidx = localidx++;
+            param._tn = getTypeName(ctx, param, {noalias:true});
         }
         paramcount = params.length;
     }
@@ -1016,13 +1075,12 @@ for (let i = 0; i < ctx.func_count; ++i)
             const decls = node.declarationList.declarations;
             for (let i = 0; i < decls.length; ++i)
             {
-                let tn = getTypeName(ctx, decls[i]);
+                let tn = getTypeName(ctx, decls[i], {noalias:true});
                 if (primitive_types[tn])
                 {
-                    if (aliased_types[tn])
-                        tn = aliased_types[tn];
                     localsout += (localsout == "" ? "" : " ") + tn;
                     decls[i]._localidx = localidx++;
+                    decls[i]._tn = tn;
                 }
             }
         }
@@ -1063,16 +1121,57 @@ for (let i = 0; i < ctx.func_count; ++i)
 console.log(')');
 
 
-//printRecursiveFrom(srcfile, 0, srcfile);
-//d(ctx, 4);
-/*
-for (let s = 0; s < srcfile.statements.length; ++s)
-{
-    const stmt = srcfile.statements[s];
- //   console.log(Sym[stmt.kind])
-    walk(stmt, 1);
-}
-*/
-//console.log(srcfile);
-//console.dir(srcfile,{depth: 20});
+function printRecursiveFrom(
+    node: ts.Node, indentLevel: number, srcfile: ts.SourceFile
+) {
+    const markers:any =
+    {
+        "FirstAssignment": "EqualsToken",
+        "LastAssignment": "CaretEqualsToken",
+        "FirstCompoundAssignment": "PlusEqualsToken",
+        "LastCompoundAssignment": "CaretEqualsToken",
+        "FirstReservedWord": "BreakKeyword",
+        "LastReservedWord": "WithKeyword",
+        "FirstKeyword": "BreakKeyword",
+        "LastKeyword": "OfKeyword",
+        "FirstFutureReservedWord": "ImplementsKeyword",
+        "LastFutureReservedWord": "YieldKeyword",
+        "FirstTypeNode": "TypePredicate",
+        "LastTypeNode": "ImportType",
+        "FirstPunctuation": "OpenBraceToken",
+        "LastPunctuation": "CaretEqualsToken",
+        "FirstToken": "Unknown",
+        "LastToken": "LastKeyword",
+        "FirstTriviaToken": "SingleLineCommentTrivia",
+        "LastTriviaToken": "ConflictMarkerTrivia",
+        "FirstLiteralToken": "NumericLiteral",
+        "LastLiteralToken": "NoSubstitutionTemplateLiteral",
+        "FirstTemplateToken": "NoSubstitutionTemplateLiteral",
+        "LastTemplateToken": "TemplateTail",
+        "FirstBinaryOperator": "LessThanToken",
+        "LastBinaryOperator": "CaretEqualsToken",
+        "FirstStatement": "VariableStatement",
+        "LastStatement": "DebuggerStatement",
+        "FirstNode": "QualifiedName",
+        "FirstJSDocNode": "JSDocTypeExpression",
+        "LastJSDocNode": "JSDocPropertyTag",
+        "FirstJSDocTagNode": "JSDocTag",
+        "LastJSDocTagNode": "JSDocPropertyTag",
+        "FirstContextualKeyword": "AbstractKeyword",
+        "LastContextualKeyword": "OfKeyword"
+    };
 
+    const indentation = "-".repeat(indentLevel);
+    let syntaxKind = Sym[node.kind];
+    if (markers[syntaxKind] != undefined)
+        syntaxKind = markers[syntaxKind];
+
+    const nodeText = node.getText(srcfile);
+    console.error(`${indentation}${syntaxKind}: ${nodeText}`);
+
+    node.forEachChild(child =>
+        printRecursiveFrom(child, indentLevel + 1, srcfile)
+    );
+}
+
+//printRecursiveFrom(ctx.srcfile, 0, ctx.srcfile);
