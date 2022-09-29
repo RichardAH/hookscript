@@ -165,26 +165,35 @@ function inferImports(ctx: any) : void
     {
         const funcname = node.expression.escapedText;
 
-        if (!hookapi[funcname])
+        if (funcname == 'hook' || funcname == 'cbak')
+            die(ctx, node, "hook and cbak cannot be called within the hook.");
+
+        if (hookapi[funcname])
+        {
+
+            const typekey = hookapi[funcname].typekey;
+            if (ctx.types[typekey] == undefined)
+            {
+                ctx.types[typekey] = ctx.type_count;
+                ctx.types_map[ctx.type_count++] = typekey;
+            }
+
+            const typeidx = ctx.types[typekey];
+
+            if (ctx.imports[funcname] == undefined)
+            {
+                ctx.imports[funcname] = {
+                    idx: ctx.import_count,
+                    typeidx: typeidx
+                };
+                ctx.imports_map[ctx.import_count++] = funcname;
+            }
             return;
-
-        const typekey = hookapi[funcname].typekey;
-        if (ctx.types[typekey] == undefined)
-        {
-            ctx.types[typekey] = ctx.type_count;
-            ctx.types_map[ctx.type_count++] = typekey;
         }
 
-        const typeidx = ctx.types[typekey];
+        // macro type
 
-        if (ctx.imports[funcname] == undefined)
-        {
-            ctx.imports[funcname] = {
-                idx: ctx.import_count,
-                typeidx: typeidx
-            };
-            ctx.imports_map[ctx.import_count++] = funcname;
-        }
+
     });
 }
 
@@ -219,7 +228,9 @@ const aliased_types : any =
 {
     'number': 'i32',
     'int' : 'i32',
-    'xfl' : 'i64'
+    'xfl' : 'i64',
+    'string' : 'i32,i32',
+    'bigstring': 'i32,i32'
 }
 
 // this can be queried to see if a type can go into a local/global variable as opposed to memory
@@ -270,15 +281,24 @@ function processFunctions(ctx: any) : void
         if (ctx.funcs[funcname] || ctx.macros[funcname])
             die(ctx, node, "Duplicate function definition: " + funcname);
 
+        if (hookapi[funcname])
+            die(ctx, node, "Cannot redefine Hook APIs: " + funcname);
+
         const realfunc = funcname == 'hook' || funcname == 'cbak';
 
         let params = [];
-        let param_types = [];
+        let param_types = [];           // the types in hook script: string, Object, int, etc.
+        let param_types_wasm = [];      // wasm types only (i32, i64)
+
         for (let i = 0; i < node.parameters.length; ++i)
         {
             const param = node.parameters[i];
             const name = param.name.escapedText;
-            const type = param.type.typeName.escapedText;
+            const type = 
+                param.type.typeName && param.type.typeName.escapedText
+                ? param.type.typeName.escapedText 
+                : nodeToString(ctx, param.type);
+
             const initializer = param.initializer;
 
             // parameter validation
@@ -304,14 +324,21 @@ function processFunctions(ctx: any) : void
             });
 
             param_types.push(type);
+
+            param_types_wasm.push(getTypeName(ctx, param, {noalias:true}));
         }
 
         if (realfunc && params.length != 1)
             die(ctx, node, "hook and cbak must have method signature i32->i64. [2]");
 
-        const rettype = (node.type === undefined ?
-                         "void" :
-                         node.type.typeName.escapedText);
+        const rettype = 
+             node.type === undefined
+                ? "void"
+                 : ( node.type.typeName && node.type.typeName.escapeText 
+                     ? node.type.typeName.escapedText
+                     : nodeToString(ctx, node.type));
+
+        const rettype_wasm = getTypeName(ctx, node, {noalias:true});
 
         if (realfunc)
         {
@@ -326,6 +353,8 @@ function processFunctions(ctx: any) : void
 
         const sig = (param_types.length == 0 ? 'void' : param_types.join(',')) + '->' + rettype;
 
+        const sig_wasm = (param_types_wasm.length == 0 ? 'void' : param_types_wasm.join(',')) + '->' + rettype_wasm;
+
         if (realfunc)
         {
             ctx.funcs[funcname] =
@@ -335,17 +364,29 @@ function processFunctions(ctx: any) : void
                 type: parseMethodSig(sig),
                 node: node,
                 typeidx: 0,         // hard coded always the hook/cbak type
+                type_wasm: parseMethodSig(sig_wasm)
             }
             ctx.funcs_map[ctx.func_count++] = funcname;
         }
         else
         {
+            // include a type so macro can be used in a block with a typeidx
+            let typeidx = ctx.types[sig_wasm];
+            if (typeidx === undefined)
+            {
+                typeidx = ctx.type_count++;
+                ctx.types[sig_wasm] = typeidx;
+                ctx.types_map[typeidx] = sig_wasm;
+            }
+
             ctx.macros[funcname] =
             {
                 idx: ctx.macro_count,
                 name: funcname,
                 type: parseMethodSig(sig),
-                node: node
+                node: node,
+                typeidx: typeidx,
+                type_wasm: parseMethodSig(sig_wasm)
             }
             ctx.macros_map[ctx.macro_count++] = funcname;
         }
@@ -419,13 +460,20 @@ function getTypeName(ctx:any, node:any, extra:any = {}) : string
     if (!node)
         return "any";
 
-    if (node.type)
-        node = node.type;
-
     let tn = "any";
+   
+//    d(node, 3);
 
-    if (node.typeName && node.typeName.escapedText)
-        tn = node.typeName.escapedText.trim();
+    if (node.type)
+    {
+        if (node.type.typeName && node.type.typeName.escapedText)
+            tn = node.type.typeName.escapedText.trim();
+        else
+            tn = nodeToString(ctx, node.type);
+        
+        node = node.type;
+    }
+
 
     if (tn.match(/^Array.*/) &&
         node.typeArguments && node.typeArguments[0])
@@ -662,6 +710,8 @@ let ctx:any =
     rawfile: rawfile,
     srcfile: srcfile,
 
+    block_depth: 0,
+
     /* types as they will appear in the output wasm, with the first type prefilled for hook & cbak */
     types: {
         "i32->i64" : 0
@@ -781,7 +831,7 @@ for (let i = 0; i < ctx.type_count; ++i)
         "(func " +
             (type.params.length > 0 ?
             "(param " + type.params.join(' ') + ") " : "") +
-            "(result " + type.rettype + ")))");
+            "(result " + type.rettype.replace(',', ' ') + ")))");
 }
 
 // output imports
@@ -825,6 +875,7 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = 
             }
             else
             {
+                console.log("    >>todo load memory var: " + name);
                 // it's a memory variable
             }
             return;
@@ -869,6 +920,9 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = 
         case Sym.ObjectLiteralExpression:
         case Sym.PropertyAccessExpression:
         case Sym.ElementAccessExpression:
+        {
+            die(ctx, expr, "not impl");
+        }
         case Sym.CallExpression:
         {
             if (expr.expression.kind != Sym.Identifier)
@@ -876,24 +930,48 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = 
 
             const id = expr.expression.escapedText.trim();
 
-            let funcno;
+            // RH TODO: check argument types
+            const args = expr.arguments;
+            for (let i = 0; i < args.length; ++i)
+            {
+                const arg = args[i];
+                processExpression(ctx, func, arg, varmap, {});
+            }
 
             if (ctx.funcs[id])
                 die(ctx, expr, "Calling hook/cbak is not supported.");
             else
             if (ctx.macros[id])
-                die(ctx, expr, "Macros not yet implemented.");
+            {
+                // inline the macro
+                //
+                // RH TODO: check params / types
+               
+                const macro = ctx.macros[id];
+                const stmts = macro.node.body.statements;
+                if (stmts.length > 0)
+                {
+                    // output start of block
+                    console.log("    block ;" + macro.typeidx + ";");
+                    ctx.block_depth++;
+                    for (let i = 0; i < stmts.length; ++i)
+                       processStatement(ctx, func, stmts[i], varmap, {branch_returns: true});
+                    console.log("    end");
+                    ctx.block_depth--;
+                }
+            }
             else
-            if (hookapi[id])
-                die(ctx, expr, "not yet implemented.");
+            if (ctx.imports[id])
+            {
+                const imp:any = ctx.imports[id];
+                console.log('    call ' + imp.idx);
+            }
             else
                 die(ctx, expr, "Unknown function: `" + id + "`");
 
-            if (!extra.noout)
-
-            console.log('    call ' + funcno);
+            //if (!extra.noout)
+            
             // RH UPTO
-            d(expr,3 );
             return;
         }
         case Sym.NewExpression:
@@ -978,7 +1056,7 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = 
     }
 }
 
-function processStatement(ctx:any, func:any, stmt:any, varmap:any):void
+function processStatement(ctx:any, func:any, stmt:any, varmap:any, extra:any = {}):void
 {
     const k = stmt.kind;
     console.error("=>> processStatement " + Sym[k] + "<<=");
