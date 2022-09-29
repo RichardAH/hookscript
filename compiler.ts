@@ -197,6 +197,11 @@ function inferImports(ctx: any) : void
     });
 }
 
+const max_sizes: any =
+{
+    'string': 251,
+    'bigstring': 16379,
+}
 
 const string_types: any =
 {
@@ -692,8 +697,6 @@ function validateTopLevelAST(ctx: any) : void
     });
 }
 
-let dataseg : any = {};
-
 function tagAll(ctx:any) : void
 {
     walk(ctx.srcfile, ctx.srcfile, undefined,
@@ -735,12 +738,28 @@ let ctx:any =
     /* macros are user defined functions that are always inlined */
     macros: {},
     macros_map: {},     // idx -> key
-    macro_count: 0
+    macro_count: 0,
+
+    /* string literals and array literals etc are encoded as data segments, which are preloaded into memory */
+    end_of_mem: 65536,          // grows toward 0 with each allocation
+
+    data: {},                   // key->idx
+    data_map: {},               // idx->key
+    data_count: 0,
+    data_start: {},             // idx -> memory start
+    data_end: {},               // idx -> memory end
+    
+    /* the same layout is used for memory variables */
+    memvar: {},                 // blklevel-identifier->idx
+    memvar_map: {},             // idx->blklevel-identifier
+    memvar_count: 0,
+    memvar_start: {},           // idx -> memory start
+    memvar_end: {}              // idx -> memory end
 };
 
 function setLocal(ctx:any, func:any, decl:any):void
 {
-    console.log("    local.set " + decl._localidx);
+    console.log(indent(ctx) + "local.set " + decl._localidx);
 }
 
 function processVariableStatement(ctx: any, func:any, node: any, varmap: any, suppress_output:boolean): void
@@ -786,6 +805,18 @@ function processVariableStatement(ctx: any, func:any, node: any, varmap: any, su
         }
         else
         {
+            // check if memvar exists
+            const mvkey = ctx.block_depth + "-" + name;
+            let mvidx = ctx.memvar[mvkey];
+            if (mvidx === undefined)
+            {
+                mvidx = ctx.memvar_count++;
+                ctx.memvar[mvkey] = mvidx;
+                ctx.memvar_map[mvidx] = mvkey;
+
+                // RHTODO: finish allocating mem var to its max size here
+                // add initalizer expression into data segment where applicable 
+            }
         }
         // RH TODO: processExpression onto stack and store in variable iff local
         // processExpression onto stack and store in memory if not local
@@ -846,6 +877,11 @@ for (let i = 0; i < ctx.import_count; ++i)
     );
 }
 
+function indent(ctx:any):string
+{
+    return " ".repeat((ctx.block_depth+2) * 2);
+}
+
 // returns the type of the expression if available
 // extra.tee    -- use local.tee instead of local.get
 // extra.noout  -- do not generate code
@@ -870,12 +906,12 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = 
                 // todo: is it a get or a set operation??
                 const instr = (extra.tee ? "local.tee" : "local.get");
                 if (!extra.noout)
-                    console.log("    " + instr + " " + node._localidx);
+                    console.log(indent(ctx) + instr + " " + node._localidx);
                 return node._tn;
             }
             else
             {
-                console.log("    >>todo load memory var: " + name);
+                console.log(indent(ctx) + ">>todo load memory var: " + name);
                 // it's a memory variable
             }
             return;
@@ -903,11 +939,34 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = 
             }
 
             if (!extra.noout)
-                console.log("    " + rettype + ".const " + expr.text.trim());
+                console.log(indent(ctx) + rettype + ".const " + expr.text.trim());
             return;
         }
         case Sym.BigIntLiteral:
         case Sym.StringLiteral:
+        {
+            const str = expr.text;
+            const len = str.length + 1; // +1 for the \0
+            let dataidx = ctx.data[str];
+            // define the literal in hook memory if it doesn't yet exist
+            if (dataidx === undefined)
+            {
+                dataidx = ctx.data_count++;
+                ctx.data[str] = dataidx;
+                ctx.data_map[dataidx] = str;
+                const end = ctx.end_of_mem;
+                ctx.end_of_mem -= len;
+                if (ctx.end_of_mem < 1024)
+                    die(ctx, expr, "Insufficient memory inside hook memory space for string literal.");
+                ctx.data_start[dataidx] = ctx.end_of_mem;
+                ctx.data_end[dataidx] = end;
+            }
+
+            // push the start and end as i32.const onto the stack
+            console.log(indent(ctx) + "i32.const " + ctx.data_start[dataidx]);
+            console.log(indent(ctx) + "i32.const " + ctx.data_end[dataidx]);         
+            return;
+        }
         case Sym.RegularExpressionLiteral:
         case Sym.NoSubstitutionTemplateLiteral:
         case Sym.TypeLiteral:
@@ -946,25 +1005,31 @@ function processExpression(ctx:any, func:any, expr:any, varmap:any, extra:any = 
                 // inline the macro
                 //
                 // RH TODO: check params / types
-               
+        
+                
+
                 const macro = ctx.macros[id];
+
+                let innervarmap = {...varmap};
+                const paramCount = processParameters(ctx, macro, innervarmap);
+
                 const stmts = macro.node.body.statements;
                 if (stmts.length > 0)
                 {
                     // output start of block
-                    console.log("    block ;" + macro.typeidx + ";");
+                    console.log(indent(ctx) + "block ;" + macro.typeidx + ";");
                     ctx.block_depth++;
                     for (let i = 0; i < stmts.length; ++i)
-                       processStatement(ctx, func, stmts[i], varmap, {branch_returns: true});
-                    console.log("    end");
+                       processStatement(ctx, func, stmts[i], innervarmap, {branch_returns: true});
                     ctx.block_depth--;
+                    console.log(indent(ctx) + "end");
                 }
             }
             else
             if (ctx.imports[id])
             {
                 const imp:any = ctx.imports[id];
-                console.log('    call ' + imp.idx);
+                console.log(indent(ctx) + "call " + imp.idx);
             }
             else
                 die(ctx, expr, "Unknown function: `" + id + "`");
@@ -1075,7 +1140,7 @@ function processStatement(ctx:any, func:any, stmt:any, varmap:any, extra:any = {
             const tn = processExpression(ctx, func, stmt.expression, varmap);
             // if there's a type left over on the stack, drop it
             if (tn)
-                console.log("    drop");
+                console.log(indent(ctx) + "drop");
             return;
         }
         case Sym.IfStatement:
@@ -1093,7 +1158,10 @@ function processStatement(ctx:any, func:any, stmt:any, varmap:any, extra:any = {
         {
             if (stmt.expression)
                 processExpression(ctx, func, stmt.expression, varmap, {rettype: func.type.rettype});
-            console.log("    return");
+            if (extra.branch_returns)
+                console.log(indent(ctx) + "br " + ctx.block_depth);
+            else
+                console.log(indent(ctx) + "return");
             return;
         }
 
@@ -1108,6 +1176,26 @@ function processStatement(ctx:any, func:any, stmt:any, varmap:any, extra:any = {
             die(ctx, stmt, "Unknown statement type: " + Sym[k]);
     }
 }
+
+function processParameters(ctx: any, func:any, varmap:any)
+{
+    let paramcount = 0;
+    if (func.node.parameters && func.node.parameters.length)
+    {
+        const params = func.node.parameters;
+        for (let i = 0; i < params.length; ++i)
+        {
+            const param : any = params[i];
+            varmap[param.name.escapedText.trim()] = param;
+            param._localidx = i; 
+            param._tn = getTypeName(ctx, param, {noalias:true});
+        }
+        paramcount = params.length;
+    }
+
+    return paramcount;
+}
+
 
 // output funcs
 for (let i = 0; i < ctx.func_count; ++i)
@@ -1128,20 +1216,8 @@ for (let i = 0; i < ctx.func_count; ++i)
             "(result " + type.rettype + ")");
     // collect local parameters
 
-    let localidx = 0;
-    let paramcount = 0;
-    if (func.node.parameters && func.node.parameters.length)
-    {
-        const params = func.node.parameters;
-        for (let i = 0; i < params.length; ++i)
-        {
-            const param : any = params[i];
-            varmap[param.name.escapedText.trim()] = param;
-            param._localidx = localidx++;
-            param._tn = getTypeName(ctx, param, {noalias:true});
-        }
-        paramcount = params.length;
-    }
+    let paramcount = processParameters(ctx, func, varmap);
+    let localidx = paramcount;
 
     // tag locals
     let localsout = "";
@@ -1164,7 +1240,9 @@ for (let i = 0; i < ctx.func_count; ++i)
         }
     });
 
-    console.log("    (local " + localsout + ")");
+    localsout = localsout.trim();
+    if (localsout != '')
+        console.log(indent(ctx) + "(local " + localsout + ")");
 
     // statement iteration
     if (!func.node.body || !func.node.body.statements || func.node.body.statements.length <= 0)
