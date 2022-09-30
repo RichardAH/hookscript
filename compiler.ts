@@ -351,8 +351,8 @@ function processFunctions(ctx: any) : void
                      ? node.type.typeName.escapedText
                      : nodeToString(ctx, node.type));
 
-        const rettype_wasm = getTypeName(ctx, node, {noalias:true});
-
+        let rettype_wasm = rettype == "void" ? "void" : getTypeName(ctx, node, {noalias:true});
+        
         if (realfunc)
         {
             if (rettype != 'i64')
@@ -384,6 +384,7 @@ function processFunctions(ctx: any) : void
         else
         {
             // include a type so macro can be used in a block with a typeidx
+            
             let typeidx = ctx.types[sig_wasm];
             if (typeidx === undefined)
             {
@@ -476,6 +477,7 @@ function hasMacroCallLoop(ctx:any, funcname:any, body:any, markmap:any, callgrap
 function getAndMarkLocals(ctx: any, callstring:any, params:any, body:any, localidx:any):string
 {
 
+    let localsout = "";
     if (params)
     {
         for (let i = 0; i < params.length; ++i)
@@ -484,16 +486,21 @@ function getAndMarkLocals(ctx: any, callstring:any, params:any, body:any, locali
             //varmap[param.name.escapedText.trim()] = param;
             if (param._localidx === undefined)
                 param._localidx = {};
-            param._tn = getTypeName(ctx, param, {noalias:true});
-            const parts = param._tn.split(',');
+            const tn = getTypeName(ctx, param, {noalias:true});
+            param._tn = tn;
+            const parts = tn.split(',');
             param._localidx[callstring] = [];
             for (let j = 0; j < parts.length; ++j)
                 param._localidx[callstring].push(localidx.localidx++);
+           
+            // if it's not the top level then we need to reserve locals for each parameter 
+            if (!(callstring == 'hook' || callstring == 'cbak'))
+                localsout += (localsout == "" ? "" : " ") + tn.replace(',', ' ');
         }
     }
 
+    // RH UPTO: figure out how to make block correctly consume its arguments and not yield empty stack
 
-    let localsout = "";
     walk(body, ctx.srcfile, [Sym.VariableStatement], (node:any):void=>
     {
         if (node.declarationList && node.declarationList.declarations &&
@@ -970,7 +977,9 @@ for (let i = 0; i < ctx.type_count; ++i)
         "(func " +
             (type.params.length > 0 ?
             "(param " + type.params.join(' ') + ") " : "") +
-            "(result " + type.rettype.replace(',', ' ') + ")))");
+            (type.rettype != "void" ?
+            "(result " + type.rettype.replace(',', ' ') + ")" : "") +
+            "))");
 }
 
 // output imports
@@ -1183,7 +1192,7 @@ function processExpression(ctx:any, callstr:string, func:any, expr:any, varmap:a
 
             {
                 // output start of block
-                console.log(indent(ctx) + "block ;" + macro.typeidx + ";");
+                console.log(indent(ctx) + "block (;" + macro.typeidx + ";)");
                 ctx.block_depth++;
                 
                 // iterate parameters backwards and store into appropriate locals
