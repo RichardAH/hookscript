@@ -21,3 +21,8 @@ Design decisions:
             let i : int = hook_pos();
             let a : Account = util_raddr(hook_param("admin_addr"));
 
+6. Macro recursion and macros that call one-another in a loop are not supported.
+        This is because macros must be inlined and unwound, and therefore this behaviour is difficult to support.
+        Further, the unwinding of recursing macros may lead to an exceptionally large number of instructions.
+        Finally, anything that can be done recursively can also be done with a loop, and a loop with guards is
+        the preferred and correct way to iterate inside a hook.
