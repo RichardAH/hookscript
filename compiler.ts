@@ -509,17 +509,16 @@ function getAndMarkLocals(ctx: any, callstring:any, params:any, body:any, locali
             const decls = node.declarationList.declarations;
             for (let i = 0; i < decls.length; ++i)
             {
-                let tn = getTypeName(ctx, decls[i], {noalias:true});
-                if (primitive_types[tn])
-                {
-                    localsout += (localsout == "" ? "" : " ") + tn;
-                    const decl = decls[i];
-                    if (decl._localidx === undefined)
-                        decl._localidx = {};
-
-                    decl._localidx[callstring] = [localidx.localidx++];
-                    decl._tn = tn;
-                }
+                let decl = decls[i];
+                let tn = getTypeName(ctx, decl, {noalias:true});
+                const parts = tn.split(',');
+                if (decl._localidx === undefined)
+                    decl._localidx = {};
+                decl._localidx[callstring] = [];
+                for (let j = 0; j < parts.length; ++j)
+                    decl._localidx[callstring].push(localidx.localidx++);
+                decl._tn = tn;
+                localsout += (localsout == "" ? "" : " ") + tn.replace(',', ' ');
             }
         }
     });
@@ -645,7 +644,7 @@ function nodeToString(ctx: any, node: ts.Node) : string
 function validateTypes(ctx: any) : void
 {
     walk(ctx.srcfile, ctx.srcfile,
-         [Sym.VariableStatement, Sym.VariableDeclaration, Sym.NewExpression, Sym.NewKeyword, Sym.ConstKeyword],
+         [Sym.VariableStatement, Sym.VariableDeclaration, Sym.NewExpression, Sym.NewKeyword],
     (node:any):void=>
     {
 
@@ -656,10 +655,6 @@ function validateTypes(ctx: any) : void
             if (k == Sym.NewKeyword || k == Sym.NewExpression)
                 die(ctx, node, "New keyword is not supported (try omitting it).");
 
-            const rawnode = nodeToString(ctx, node);
-            if (k == Sym.ConstKeyword ||
-                rawnode.match(/(^| |\t)+const($| |\t)+/))
-                die(ctx, node, "Const keyword is not supported. Use let instead.");
             return;
         }
 
@@ -1014,11 +1009,10 @@ function processExpression(ctx:any, callstr:string, func:any, expr:any, varmap:a
             if (!varmap[name])
                 die(ctx, expr, "Identifier " + name + " not understood. Missing variable declaration?");
 
+            console.error(">>> Identifier: " + name);
+
             const node:any = varmap[name];
-            if (node._localidx)
-            {
                 // it's a local variable
-                console.error("==>variable: " + name);
 
                 // todo: is it a get or a set operation??
                 if (!extra.noout)
@@ -1028,9 +1022,9 @@ function processExpression(ctx:any, callstr:string, func:any, expr:any, varmap:a
                         console.log(indent(ctx) + instr + " " + node._localidx[callstr][i]);
                 }
                 return node._tn;
-            }
-            else
-            {
+            
+            /*
+             * {
                 //console.log(indent(ctx) + ">>todo load memory var: " + name);
                 // it's a memory variable
 
@@ -1041,6 +1035,7 @@ function processExpression(ctx:any, callstr:string, func:any, expr:any, varmap:a
                 console.log(indent(ctx) + "i32.const " + size);
                 return "i32,i32";
             }
+           */
             return;
         }
         case Sym.NumericLiteral:
@@ -1131,9 +1126,8 @@ function processExpression(ctx:any, callstr:string, func:any, expr:any, varmap:a
                 die(ctx, expr, "Unknown function: `" + id + "`");
 
 
+            console.error(">>> Identifier: " + id);
 
-            // RH TODO: check argument types
-            
             const macro = ctx.macros[id];
             const args = expr.arguments;
             

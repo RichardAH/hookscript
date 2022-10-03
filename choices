@@ -1,27 +1,25 @@
 Design decisions:
 
-1.  The const keyword is not supported.
-        - Const has poorly defined meaning in TS to begin with.
-
-2.  Array types must be specified like so:
-        let a : Array<string> = ['a','b','c']       // initalized array
+1.  Array types must be specified like so:
+        let   a : Array<string> = ['a','b','c']       // initalized array
+        const a : Array<string> = ['a','b','c']       // initalized array
         or
-        let a : Array<string> = Array<string>(10);  // blank initalized array
+        let   a : Array<string> = Array<string>(10);  // blank initalized array
 
-3. There are no undefined variables:
+2. There are no undefined variables:
         A variable takes on a '0' or 'blank' value if not specified but it is never undefined.
         This is because supporting union of type and undefined at runtime produces unwanted instruciton overhead.
 
-4. Placing a $ symbol in front of a hook api call such as $param causes the hook to rollback if the call fails.
+3. Placing a $ symbol in front of a hook api call such as $param causes the hook to rollback if the call fails.
         Failing to place such a symbol causes the hook to continue executing on error...
         With global: errno being populated with the error code.
 
-5. HookAPIs with a single output write buffer can be assigned to a variable of the appropriate type.
+4. HookAPIs with a single output write buffer can be assigned to a variable of the appropriate type.
         For example:
             let i : int = hook_pos();
             let a : Account = util_raddr(hook_param("admin_addr"));
 
-6. Macro recursion and macros that call one-another in a loop are not supported.
+5. Macro recursion and macros that call one-another in a loop are not supported.
         This is because macros must be inlined and unwound, and therefore this behaviour is difficult to support.
         Further, the unwinding of recursing macros may lead to an exceptionally large number of instructions.
         Finally, anything that can be done recursively can also be done with a loop, and a loop with guards is
